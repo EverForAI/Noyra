@@ -20,6 +20,7 @@ def _connection() -> sqlite3.Connection:
         "CREATE TABLE events ("
         "event_id TEXT PRIMARY KEY, subject_id TEXT NOT NULL, event_type TEXT NOT NULL, "
         "source TEXT NOT NULL, payload_json TEXT NOT NULL DEFAULT '{}', "
+        "payload_archive_key TEXT, "
         "causal_parent_ids_json TEXT NOT NULL DEFAULT '[]')"
     )
     return connection
@@ -240,6 +241,23 @@ def test_malformed_event_payload_does_not_break_source_classification() -> None:
         )
         assert provenance.status is SourceProvenanceStatus.DIRECT_REFERENCES_CLASSIFIED
         assert provenance.categories == (SourceCategory.HUMAN_INTERACTION,)
+    finally:
+        connection.close()
+
+
+def test_archived_event_payload_is_unknown_not_a_verified_origin() -> None:
+    connection = _connection()
+    connection.execute(
+        "INSERT INTO events("
+        "event_id,subject_id,event_type,source,payload_json,payload_archive_key) "
+        "VALUES ('evt-archived','subject-1','interaction_received','human','{}','segment-1')"
+    )
+    try:
+        provenance = classify_source_event_ids_json(
+            connection, "subject-1", _encode(["evt-archived"])
+        )
+        assert provenance.status is SourceProvenanceStatus.UNKNOWN
+        assert provenance.categories == (SourceCategory.UNKNOWN,)
     finally:
         connection.close()
 

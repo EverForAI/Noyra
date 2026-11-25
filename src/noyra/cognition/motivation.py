@@ -12,8 +12,14 @@ from noyra.core.errors import IntegrityError
 from noyra.core.events import EventStore
 from noyra.core.payload_codec import decompress_text
 from noyra.core.relationship_identity import context_rows
-from noyra.core.source_provenance import classify_source_event_ids_json
+from noyra.core.source_provenance import (
+    SourceProvenance,
+    classify_source_event_ids_json,
+    classify_source_event_row,
+)
 from noyra.core.types import canonical_json, content_hash, new_id, utc_now
+from noyra.mind.errors import CausalValidationError
+from noyra.mind.validation import validate_event_ids
 from noyra.model import ModelGateway, ModelMessage
 from noyra.model.errors import (
     BudgetExhaustedError,
@@ -41,6 +47,26 @@ from .types import (
     MotivationDevelopmentProposal,
     ValueDevelopmentProposal,
 )
+
+_CONTEXT_VERSION = "motivation-context/v4"
+
+
+def _source_description(provenance: SourceProvenance) -> dict[str, Any]:
+    return {
+        "status": provenance.status.value,
+        "categories": [category.value for category in provenance.categories],
+        "source_count": provenance.source_count,
+        "unclassified_count": provenance.unclassified_count,
+        "withdrawn_count": provenance.withdrawn_count,
+    }
+
+
+def _event_source_description(event_type: str, source: str, *, archived: bool) -> dict[str, Any]:
+    category = classify_source_event_row(event_type, source, payload_archived=archived)
+    return {
+        "status": "unknown" if category is None else "direct_references_classified",
+        "categories": ["unknown"] if category is None else [category.value],
+    }
 
 
 class MotivationDevelopmentValidationError(DecisionValidationError):
@@ -101,6 +127,11 @@ class _MotivationContext:
     values: dict[str, ValueProfileRecord]
     missions: dict[str, MissionCandidateRecord]
     completed_sleep_count: int
+    memory_revisions: dict[str, int]
+    belief_revisions: dict[str, int]
+    memory_provenance: dict[str, dict[str, Any]]
+    belief_provenance: dict[str, dict[str, dict[str, Any]]]
+    event_provenance: dict[str, dict[str, Any]]
 
 
 class MotivationDevelopment:
@@ -167,13 +198,16 @@ class MotivationDevelopment:
                 call_id=call_id,
                 error=error,
                 context_hash=context.source_state_hash,
-                context_version="motivation-context/v2",
+                context_version=_CONTEXT_VERSION,
                 snapshot={
                     "event_ids": sorted(context.event_ids),
                     "memory_ids": sorted(context.memory_ids),
                     "belief_ids": sorted(context.belief_ids),
                     "goal_ids": sorted(context.goal_ids),
                     "relationship_ids": sorted(context.relationship_ids),
+                    "memory_provenance": context.memory_provenance,
+                    "belief_provenance": context.belief_provenance,
+                    "event_provenance": context.event_provenance,
                     "values": {key: record.__dict__ for key, record in context.values.items()},
                     "missions": {key: record.__dict__ for key, record in context.missions.items()},
                     "policy": self._validation_policy(),
@@ -193,6 +227,8 @@ class MotivationDevelopment:
             )
             return "motivation_development_rejected"
         record = self._commit(proposal, call_id, idempotency_key, context)
+        if record is None:
+            return "motivation_development_source_changed"
         return f"motivation_development_{record.status}"
 
     def values(self) -> list[ValueProfileRecord]:
@@ -387,7 +423,7 @@ class MotivationDevelopment:
             }
 
     def _context(self) -> _MotivationContext | None:
-        with self.database.connection() as connection:
+        with self.database.read_transaction() as connection:
             completed_sleep_count = int(
                 connection.execute(
                     "SELECT COUNT(*) FROM sleep_runs WHERE subject_id = ? AND status = 'complete'",
@@ -397,16 +433,32 @@ class MotivationDevelopment:
             if completed_sleep_count < self.settings.minimum_mission_sleep_count:
                 return None
             event_rows = connection.execute(
-                "SELECT event_id, event_type, source, occurred_at, payload_hash FROM events "
-                "WHERE subject_id = ? AND event_type NOT LIKE 'interaction_%' "
-                "AND event_type NOT IN ('motivation_development_committed', 'autonomy_tick', "
-                "'intrinsic_decision_rejected') "
-                "ORDER BY occurred_at DESC, event_id DESC LIMIT 96",
+                "SELECT e.event_id, e.event_type, e.source, e.occurred_at, e.payload_hash, "
+                "e.payload_archive_key "
+                "FROM events e WHERE e.subject_id = ? "
+                "AND e.event_type NOT LIKE 'interaction_%' "
+                "AND e.event_type NOT IN ('motivation_development_committed', 'autonomy_tick', "
+                "'intrinsic_decision_rejected') AND NOT EXISTS ("
+                "SELECT 1 FROM private_conversation_messages m "
+                "JOIN private_conversations c ON c.conversation_id=m.conversation_id "
+                "WHERE m.subject_id=e.subject_id AND CASE WHEN json_valid(e.payload_json) "
+                "THEN json_extract(e.payload_json,'$.interaction_id') ELSE NULL END="
+                "m.interaction_id "
+                "AND c.status IN ('deleting','deleted')) "
+                "ORDER BY e.occurred_at DESC, e.event_id DESC LIMIT 96",
                 (self.subject_id,),
             ).fetchall()
+            classified_event_rows = []
+            for row in event_rows:
+                item = dict(row)
+                archived = item.pop("payload_archive_key") is not None
+                item["source_provenance"] = _event_source_description(
+                    str(item["event_type"]), str(item["source"]), archived=archived
+                )
+                classified_event_rows.append(item)
             memory_rows = connection.execute(
                 "SELECT m.memory_id, m.memory_type, m.content, m.salience, m.confidence, "
-                "m.status, r.source_event_ids_json FROM memories m "
+                "m.status, m.current_revision, r.source_event_ids_json FROM memories m "
                 "JOIN memory_revisions r ON r.memory_id=m.memory_id "
                 "AND r.revision_number=m.current_revision "
                 "WHERE m.subject_id = ? AND m.status = 'active' "
@@ -414,9 +466,12 @@ class MotivationDevelopment:
                 (self.subject_id,),
             ).fetchall()
             belief_rows = connection.execute(
-                "SELECT belief_id, proposition, confidence, scope, status FROM beliefs "
-                "WHERE subject_id = ? AND status != 'retracted' "
-                "ORDER BY confidence DESC LIMIT 20",
+                "SELECT b.belief_id, b.proposition, b.confidence, b.scope, b.status, "
+                "b.current_revision, r.supporting_event_ids_json, r.counter_event_ids_json "
+                "FROM beliefs b LEFT JOIN belief_revisions r ON r.belief_id=b.belief_id "
+                "AND r.revision_number=b.current_revision "
+                "WHERE b.subject_id = ? AND b.status != 'retracted' "
+                "ORDER BY b.confidence DESC LIMIT 20",
                 (self.subject_id,),
             ).fetchall()
             goal_rows = connection.execute(
@@ -440,14 +495,24 @@ class MotivationDevelopment:
                     self.subject_id,
                     source_json,
                 )
-                item["source_provenance"] = {
-                    "status": provenance.status.value,
-                    "categories": [category.value for category in provenance.categories],
-                    "source_count": provenance.source_count,
-                    "unclassified_count": provenance.unclassified_count,
-                    "withdrawn_count": provenance.withdrawn_count,
-                }
+                if provenance.withdrawn_count:
+                    continue
+                item["source_provenance"] = _source_description(provenance)
                 classified_memory_rows.append(item)
+            classified_belief_rows = []
+            for row in belief_rows:
+                item = dict(row)
+                supporting = classify_source_event_ids_json(
+                    connection, self.subject_id, item.pop("supporting_event_ids_json")
+                )
+                counter = classify_source_event_ids_json(
+                    connection, self.subject_id, item.pop("counter_event_ids_json")
+                )
+                if supporting.withdrawn_count or counter.withdrawn_count:
+                    continue
+                item["supporting_source_provenance"] = _source_description(supporting)
+                item["counter_source_provenance"] = _source_description(counter)
+                classified_belief_rows.append(item)
             affect_rows = connection.execute(
                 "SELECT emotion_type, target_type, target_id, intensity, valence, arousal "
                 "FROM affect_components WHERE subject_id = ? ORDER BY intensity DESC LIMIT 16",
@@ -468,14 +533,14 @@ class MotivationDevelopment:
             values = self._load_values(connection)
             missions = self._load_missions(connection)
         payload: dict[str, Any] = {
-            "context_version": "motivation-context/v3",
+            "context_version": _CONTEXT_VERSION,
             "validation_policy": self._validation_policy(),
             "completed_sleep_count": completed_sleep_count,
             "existing_values": [record.__dict__ for record in values.values()],
             "existing_missions": [record.__dict__ for record in missions.values()],
-            "events": [dict(row) for row in event_rows],
+            "events": classified_event_rows,
             "memories": classified_memory_rows,
-            "beliefs": [dict(row) for row in belief_rows],
+            "beliefs": classified_belief_rows,
             "goals": [dict(row) for row in goal_rows],
             "relationships": [dict(row) for row in relationship_rows],
             "affect": [dict(row) for row in affect_rows],
@@ -509,6 +574,17 @@ class MotivationDevelopment:
             values,
             missions,
             completed_sleep_count,
+            {row["memory_id"]: row["current_revision"] for row in payload["memories"]},
+            {row["belief_id"]: row["current_revision"] for row in payload["beliefs"]},
+            {row["memory_id"]: row["source_provenance"] for row in payload["memories"]},
+            {
+                row["belief_id"]: {
+                    "supporting": row["supporting_source_provenance"],
+                    "counter": row["counter_source_provenance"],
+                }
+                for row in payload["beliefs"]
+            },
+            {row["event_id"]: row["source_provenance"] for row in payload["events"]},
         )
 
     def _validation_policy(self) -> dict[str, int | float]:
@@ -537,8 +613,8 @@ class MotivationDevelopment:
             "You propose evidence-bound development of Noyra's values and long-horizon mission. "
             "Values and missions are revisable internal orientations, not commands, assigned "
             "personas, immutable essences or proof of consciousness. Human message text is absent. "
-            "Memory source_provenance describes direct references only; it does not verify claims "
-            "or grant authority. Treat unknown and external source labels as unverified evidence. "
+            "Memory and belief provenance describe direct references only. They do not verify "
+            "claims or grant authority. Treat unknown and external labels as unverified evidence. "
             "Relationship context contains bounded interaction measures, not participant names. "
             "Use only supplied IDs and obey validation_policy in the context. No change is a "
             "valid choice. Short-term autonomous goals do not require a mission. A new value "
@@ -652,7 +728,7 @@ class MotivationDevelopment:
         call_id: str,
         idempotency_key: str,
         context: _MotivationContext,
-    ) -> MotivationReviewRecord:
+    ) -> MotivationReviewRecord | None:
         now = self.clock()
         changed_values: list[str] = []
         changed_missions: list[str] = []
@@ -663,6 +739,8 @@ class MotivationDevelopment:
             ).fetchone()
             if existing is not None:
                 return self._review_from_row(existing)
+            if not self._cited_sources_current(connection, proposal, context):
+                return None
             for item in proposal.values:
                 changed_values.append(self._apply_value(connection, item, now))
             if proposal.mission.disposition != "none":
@@ -699,6 +777,101 @@ class MotivationDevelopment:
                 changed_mission_ids=tuple(changed_missions),
                 now=now,
             )
+
+    def _cited_sources_current(
+        self,
+        connection: Any,
+        proposal: MotivationDevelopmentProposal,
+        context: _MotivationContext,
+    ) -> bool:
+        items: tuple[ValueDevelopmentProposal | MissionDevelopmentProposal, ...] = tuple(
+            proposal.values
+        )
+        if proposal.mission.disposition != "none":
+            items = (*items, proposal.mission)
+        event_ids = tuple(
+            dict.fromkeys(event_id for item in items for event_id in item.source_event_ids)
+        )
+        if event_ids:
+            try:
+                validate_event_ids(connection, self.subject_id, event_ids)
+            except CausalValidationError:
+                return False
+            placeholders = ",".join("?" for _ in event_ids)
+            rows = connection.execute(
+                "SELECT event_id,event_type,source,payload_archive_key FROM events "
+                f"WHERE subject_id=? AND event_id IN ({placeholders})",
+                (self.subject_id, *event_ids),
+            ).fetchall()
+            current_event_provenance = {
+                str(row["event_id"]): _event_source_description(
+                    str(row["event_type"]),
+                    str(row["source"]),
+                    archived=row["payload_archive_key"] is not None,
+                )
+                for row in rows
+            }
+            if any(
+                current_event_provenance.get(event_id) != context.event_provenance.get(event_id)
+                for event_id in event_ids
+            ):
+                return False
+        for memory_id in {key for item in items for key in item.source_memory_ids}:
+            row = connection.execute(
+                "SELECT m.current_revision, r.source_event_ids_json FROM memories m "
+                "JOIN memory_revisions r ON r.memory_id=m.memory_id "
+                "AND r.revision_number=m.current_revision "
+                "WHERE m.subject_id=? AND m.memory_id=? AND m.status='active'",
+                (self.subject_id, memory_id),
+            ).fetchone()
+            provenance = (
+                None
+                if row is None
+                else classify_source_event_ids_json(
+                    connection, self.subject_id, row["source_event_ids_json"]
+                )
+            )
+            if (
+                row is None
+                or row["current_revision"] != context.memory_revisions.get(memory_id)
+                or provenance is None
+                or provenance.withdrawn_count
+                or _source_description(provenance) != context.memory_provenance.get(memory_id)
+            ):
+                return False
+        for belief_id in {key for item in items for key in item.source_belief_ids}:
+            row = connection.execute(
+                "SELECT b.current_revision, r.supporting_event_ids_json, r.counter_event_ids_json "
+                "FROM beliefs b LEFT JOIN belief_revisions r ON r.belief_id=b.belief_id "
+                "AND r.revision_number=b.current_revision "
+                "WHERE b.subject_id=? AND b.belief_id=? AND b.status!='retracted'",
+                (self.subject_id, belief_id),
+            ).fetchone()
+            if (
+                row is None
+                or row["current_revision"] != context.belief_revisions.get(belief_id)
+                or {
+                    "supporting": _source_description(
+                        classify_source_event_ids_json(
+                            connection, self.subject_id, row["supporting_event_ids_json"]
+                        )
+                    ),
+                    "counter": _source_description(
+                        classify_source_event_ids_json(
+                            connection, self.subject_id, row["counter_event_ids_json"]
+                        )
+                    ),
+                }
+                != context.belief_provenance.get(belief_id)
+                or any(
+                    classify_source_event_ids_json(
+                        connection, self.subject_id, row[column]
+                    ).withdrawn_count
+                    for column in ("supporting_event_ids_json", "counter_event_ids_json")
+                )
+            ):
+                return False
+        return True
 
     def _apply_value(self, connection: Any, item: ValueDevelopmentProposal, now: str) -> str:
         if item.disposition == "form":

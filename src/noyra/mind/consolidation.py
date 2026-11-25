@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from noyra.core.database import Database
 from noyra.core.errors import IntegrityError
 from noyra.core.events import EventStore
+from noyra.core.source_provenance import MAX_SOURCE_EVENT_IDS
 from noyra.core.types import canonical_json, content_hash, new_id, utc_now
 
 from .memory import MemoryStore
@@ -188,6 +189,10 @@ class MemoryConsolidator:
             dispositions: list[tuple[str, str | None, str, str]] = []
             for candidate in candidates:
                 memory = candidate.memory
+                revision_sources = candidate.source_event_ids
+                if len(revision_sources) < MAX_SOURCE_EVENT_IDS:
+                    revision_sources = (*revision_sources, event.event_id)
+                # At capacity the consolidation run and member still record the operation.
                 age_days = max(
                     0.0,
                     (current - self._parse_time(memory.updated_at)).total_seconds() / 86_400,
@@ -202,7 +207,7 @@ class MemoryConsolidator:
                         confidence=memory.confidence,
                         status="archived",
                         reason=f"duplicate consolidated into {duplicate_keeper}",
-                        source_event_ids=(*candidate.source_event_ids, event.event_id),
+                        source_event_ids=revision_sources,
                         expected_revision=memory.current_revision,
                     )
                     archived.append(memory.memory_id)
@@ -227,7 +232,7 @@ class MemoryConsolidator:
                         confidence=memory.confidence,
                         status="active",
                         reason="repeated contextual recall strengthened accessibility",
-                        source_event_ids=(*candidate.source_event_ids, event.event_id),
+                        source_event_ids=revision_sources,
                         expected_revision=memory.current_revision,
                     )
                     strengthened.append(revised.memory_id)
@@ -286,7 +291,7 @@ class MemoryConsolidator:
                         confidence=memory.confidence,
                         status="archived",
                         reason="inactive low-salience memory moved out of active recall",
-                        source_event_ids=(*candidate.source_event_ids, event.event_id),
+                        source_event_ids=revision_sources,
                         expected_revision=memory.current_revision,
                     )
                     archived.append(memory.memory_id)

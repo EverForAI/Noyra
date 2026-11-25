@@ -27,7 +27,17 @@ authorization.
 
 求助回复进入模型前携带 `human_assistance_reply`、`verification=unverified` 和 `authority=none`。文本分类器命中时仍隔离；无命中只表示没有已知信号，不是安全结论。模型结果仍限于 `continue/wait/end`，理由仍是待复核的模型说明。持久事件记录其 `assistance_reply` 来源事件 ID；该引用保留在事件载荷中，不新增事件因果父边，以免改变既有派生事件与删除审查边界。该处置只允许项目恢复自身复审流程，不授权任务执行、阶段选择、权限变更或付款。撤回/删除检查和既有求助归属校验保持不变。
 
-本轮不递归证明记忆谱系，不把未知旧记忆从日常认知中整体移除，不改变价值/使命的现有渐进约束，也不将分类器升级为信任或安全判定器。
+记忆整合现在将各输入记忆当前修订中记录的直接事件引用，与本轮显式证据取并集后写到输出记忆；输入记忆的“superseded”状态修订仍保留它自己的直接引用。撤销整合重新启用原记忆时也保留该记忆当前引用，不以整合证据替换。并集超过现有每条记忆 64 个事件引用上限时，整合在任何写入前拒绝，不截断来源，也不产生部分状态。这里不递归证明输入记忆的祖先谱系；整合记录仍单独保存输入 memory IDs 与本轮 event IDs。
+
+事件载荷归档后，运行库会以 `{}` 替换热表中的原始 payload。来源分类器因此将这类事件记为 `unknown`，不会根据仅剩的事件类型/source 字段推断其交互身份。本轮不补建事件—私聊关联表，也不声称修复历史上已归档私聊事件对话销毁工作的可追溯性；该关联需单独设计和验收。
+
+动机上下文为记忆和信念的支持/反证事件附加分类。动机上下文还从事件候选中排除能由当前未归档事件 payload 确认关联、且已进入删除流程的私聊派生事件。已归档事件可以只以元数据出现在上下文中，并明确标为 `unknown`；不会假装恢复被清掉的原 payload。提交时使用同一写事务再次检查被提议引用的事件、记忆/信念修订号、活动状态及可解析的事件撤回状态；模型调用期间若证据修订或进入删除流程，拒绝本次候选，不改变价值、使命或历史记录。尚无可完整解析的旧修订仍保持 `unknown`，不会回填。
+
+已确认：完整性审计要求的私聊事件和记忆谱系映射注册也被对话删除复核采用，并非单独供该功能使用，因此本轮没有扩大未审查衍生域清单，避免意外阻断现有删除请求。
+
+记忆巩固对原记忆的归档/强化修订保留已有事件引用；在 64 个引用的容量边界，不为了记录巩固操作再附加第 65 个 ID，巩固运行及成员记录仍保留该操作。当前巩固成员表不快照父记忆修订号，因而不能证明它所指父记忆在所有后续时点的完整祖先谱系；本轮不据此为摘要记忆生成可信的递归来源标签。
+
+本轮不把未知旧记忆从日常认知中整体移除，不改变价值/使命的现有渐进约束，也不将分类器升级为信任或安全判定器。
 
 ### 兼容与实施边界
 
@@ -78,17 +88,52 @@ boundaries. This disposition only allows the project to resume its own review pa
 execution, phase selection, permission changes, or payment. Existing withdrawal/deletion and
 reply-ownership checks remain unchanged.
 
-This step does not prove recursive memory lineage, remove unknown legacy memories from ordinary cognition,
-change the existing gradual value/mission constraints, or turn a classifier into a trust or safety oracle.
+Memory integration now carries forward the union of direct event references from each input memory's
+current revision and the current operation's explicit evidence. Superseding revisions retain each
+original memory's own direct references; reversing an integration also retains those current references
+instead of replacing them with the integration evidence. If the union exceeds the existing 64-event
+per-memory limit, integration fails before any write; it never truncates provenance or partially commits.
+This does not recursively prove the input memories' own ancestry; the integration record continues to
+store input memory IDs and operation evidence event IDs separately.
+
+After event payload archiving, the runtime replaces the hot-row payload with `{}`. The classifier therefore
+marks those event references `unknown`; it does not infer interaction identity from the remaining event
+type/source fields. This step adds no event-to-private-conversation mapping and does not claim to repair
+traceability for already archived private-message events during conversation erasure. That linkage needs
+a separate design and acceptance effort.
+
+Motivation context classifies direct support/counter-event references for beliefs as well as memories.
+Private-conversation derivatives whose linkage can be checked from a hot, unarchived event payload and
+are deleting/deleted are excluded from event candidates. An archived event may still appear as metadata,
+explicitly labeled `unknown`; the erased payload is not reconstructed. At commit, in the same write
+transaction, the implementation rechecks cited events, memory/belief revision numbers, active status,
+and resolvable withdrawal state. If evidence changed or entered deletion while the model was running,
+the proposal is discarded without changing values, missions, or history. Legacy revisions that cannot
+be fully resolved remain `unknown`; no backfill is performed.
+
+The private-erasure workflow also consumes the registered private-event and memory-lineage mappings
+used by integrity review. This step therefore does not broaden the erasure workflow's unreviewed-
+derivative domain list, which could otherwise block existing deletion requests.
+
+Memory-consolidation revisions retain their existing event references. At the 64-reference capacity
+boundary, the consolidation event is not appended as an event 65; the durable run/member records still
+record the operation. The current consolidation-member table does not snapshot parent memory revision
+numbers, so it cannot establish complete ancestry for all future states of those parents. This step does
+not assign recursive trusted provenance to summary memories on that basis.
+
+Unknown legacy memories are not removed from ordinary cognition; gradual value/mission constraints stay
+unchanged; and the classifier is not upgraded to a trust or safety oracle.
 
 ### Compatibility and implementation boundary
 
 The classifier reads existing `source_event_ids_json`; it does not rewrite or delete historical memories,
-beliefs, or relationships or add a schema migration. Motivation context labels direct memory sources
-while retaining unknown legacy memories as non-authoritative experience and omits relationship display
-names. Help-reply review carries an explicit unverified source label and source-event reference; existing
-withdrawal, ownership, and disposition gates remain. Ordinary interaction, ordinary memory, and legitimate
-project review are not globally blocked by provenance labels.
+beliefs, or relationships or add a schema migration. Motivation context labels direct memory and belief
+sources while retaining unknown legacy memories as non-authoritative experience and omitting relationship
+display names. Memory integration preserves parent and explicit operation evidence without truncation;
+consolidation retains original references at the capacity limit. Cited evidence is rechecked atomically
+before motivation writes. Help-reply review carries an explicit unverified source label and source-event
+reference; existing withdrawal, ownership, and disposition gates remain. Ordinary interaction, ordinary
+memory, and legitimate project review are not globally blocked by provenance labels.
 
 Implementation: [`src/noyra/core/source_provenance.py`](../../src/noyra/core/source_provenance.py). The
 result contains source descriptions and resolution status only, never a trust or authorization decision.

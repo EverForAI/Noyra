@@ -63,7 +63,7 @@ def classify_source_event_ids_json(
 
     placeholders = ",".join("?" for _ in event_ids)
     rows = connection.execute(
-        "SELECT event_id,event_type,source FROM events "
+        "SELECT event_id,event_type,source,payload_archive_key FROM events "
         f"WHERE subject_id=? AND event_id IN ({placeholders})",
         (subject_id, *event_ids),
     ).fetchall()
@@ -102,7 +102,14 @@ def classify_source_event_ids_json(
         if event_id in withdrawn_ids:
             withdrawn_count += 1
             continue
-        category = _classify_event(str(row["event_type"]), str(row["source"]))
+        # Archiving replaces the original payload with {}. The event kind alone
+        # cannot prove whether its original private conversation was withdrawn.
+        if row["payload_archive_key"] is not None:
+            unclassified_count += 1
+            continue
+        category = classify_source_event_row(
+            str(row["event_type"]), str(row["source"]), payload_archived=False
+        )
         if category is None:
             unclassified_count += 1
         else:
@@ -154,7 +161,15 @@ def _parse_event_ids(value: object) -> tuple[str, ...] | None:
     return tuple(decoded)
 
 
-def _classify_event(event_type: str, source: str) -> SourceCategory | None:
+def classify_source_event_row(
+    event_type: str,
+    source: str,
+    *,
+    payload_archived: bool = False,
+) -> SourceCategory | None:
+    """Classify exact event metadata without promoting archived rows or content."""
+    if payload_archived:
+        return None
     if event_type in {"interaction_received", "human_message"} and source == "human":
         return SourceCategory.HUMAN_INTERACTION
     if event_type == "assistance_reply" and source == "participant":
