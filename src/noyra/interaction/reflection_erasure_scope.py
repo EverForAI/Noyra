@@ -23,6 +23,7 @@ from .public_cold_reader import (
     PrivateArchiveReviewReader,
     archive_keyring_revision,
 )
+from .reflection_lineage import sleep_lineage_counts
 
 _MAX_RECEIPT_IDS = 2 * MAX_SOURCE_EVENT_IDS + 1
 _MAX_RECEIPT_BYTES = 128 * 1024
@@ -49,6 +50,7 @@ def sleep_reflection_scope(
         "coverage": "known_direct_links_and_reviewed_sleep_derivatives",
         "status": "bounded_out",
         "counts": None,
+        "lineage": None,
         "archive": {"status": "not_checked", "segments": 0, "events": 0},
     }
     if time.monotonic() >= deadline:
@@ -60,7 +62,7 @@ def sleep_reflection_scope(
         )
         if archive["status"] not in {"not_present", "verified_local"}:
             return {**bounded, "archive": archive, "status": "incomplete"}
-        counts = _counts(
+        observed = _counts(
             connection,
             subject,
             window,
@@ -69,9 +71,16 @@ def sleep_reflection_scope(
             archived_target_events,
             archived_model_calls,
         )
-        if counts is None or time.monotonic() >= deadline:
+        if observed is None or time.monotonic() >= deadline:
             return {**bounded, "archive": archive}
-        return {**bounded, "status": "observed", "counts": counts, "archive": archive}
+        counts, lineage = observed
+        return {
+            **bounded,
+            "status": "observed",
+            "counts": counts,
+            "lineage": lineage,
+            "archive": archive,
+        }
     except IntegrityError:
         return {**bounded, "status": "incomplete"}
     except sqlite3.OperationalError as error:
@@ -265,7 +274,7 @@ def _counts(
     row_limit: int,
     archived_target_events: set[str],
     archived_model_calls: dict[str, tuple[str, str | None]],
-) -> dict[str, int] | None:
+) -> tuple[dict[str, int], dict[str, int]] | None:
     reflections = connection.execute(
         "SELECT r.sleep_id,f.event_id,e.event_id AS matched_event_id,e.payload_archive_key,"
         "json_valid(e.payload_json) AS valid_payload,"
@@ -359,8 +368,10 @@ def _counts(
         target_events.add(str(row[0]))
         if len(target_events) > row_limit or time.monotonic() >= deadline:
             return None
+    affected_memories: set[str] = set()
+    affected_beliefs: dict[str, set[str]] = {}
     receipts = connection.execute(
-        "SELECT r.sleep_id,f.event_id,i.integration_type,"
+        "SELECT r.sleep_id,f.event_id,i.integration_type,i.target_id,i.operation,i.result_hash,"
         "CASE WHEN length(CAST(i.source_ids_json AS BLOB))<=? "
         "THEN i.source_ids_json END AS sources FROM sleep_runs r "
         "JOIN sleep_reflections f ON f.sleep_id=r.sleep_id "
@@ -387,6 +398,21 @@ def _counts(
                 sleep_id in mixed_runs
             )
         evidence = _receipt_evidence(row["sources"], row["event_id"])
+        if integration_type in {"memory", "belief"} and (
+            sleep_id in target_runs or (evidence is not None and evidence & target_events)
+        ):
+            target_id = row["target_id"]
+            expected_operation = "created" if integration_type == "memory" else "revised"
+            if (
+                not isinstance(target_id, str)
+                or not target_id
+                or row["operation"] != expected_operation
+            ):
+                raise IntegrityError("sleep lineage receipt target is invalid")
+            if integration_type == "memory":
+                affected_memories.add(target_id)
+            else:
+                affected_beliefs.setdefault(target_id, set()).add(row["result_hash"])
         if evidence is None:
             counts["opaque_derivative_receipts"] += 1
             counts["opaque_memory_belief_receipts"] += integration_type in {"memory", "belief"}
@@ -425,7 +451,10 @@ def _counts(
     counts["project_sleep_reviews_on_target_model_run"] = sum(
         str(row["sleep_id"]) in target_runs for row in project_rows
     )
-    return counts
+    lineage = sleep_lineage_counts(
+        connection, subject, affected_memories, affected_beliefs, row_limit, deadline
+    )
+    return (counts, lineage) if lineage is not None else None
 
 
 def _receipt_evidence(encoded: object, operation_event: str) -> set[str] | None:
