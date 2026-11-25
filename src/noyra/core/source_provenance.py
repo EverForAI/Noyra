@@ -11,8 +11,6 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Literal
 
-from .private_sources import assert_event_sources_available
-
 MAX_SOURCE_EVENT_IDS = 64
 MAX_SOURCE_EVENT_IDS_JSON_CHARS = 32_768
 MAX_SOURCE_EVENT_ID_CHARS = 512
@@ -20,6 +18,7 @@ MAX_SOURCE_EVENT_ID_CHARS = 512
 
 class SourceCategory(StrEnum):
     HUMAN_INTERACTION = "human_interaction"
+    HUMAN_ASSISTANCE_REPLY = "human_assistance_reply"
     EXTERNAL_OBSERVATION = "external_observation"
     UNKNOWN = "unknown"
 
@@ -69,6 +68,29 @@ def classify_source_event_ids_json(
         (subject_id, *event_ids),
     ).fetchall()
     by_id = {str(row["event_id"]): row for row in rows}
+    private_tables = {
+        str(row["name"])
+        for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name IN ('private_conversation_messages','private_conversations')"
+        ).fetchall()
+    }
+    withdrawn_ids: set[str] = set()
+    if private_tables == {"private_conversation_messages", "private_conversations"}:
+        withdrawn_ids = {
+            str(row["event_id"])
+            for row in connection.execute(
+                "SELECT e.event_id FROM events e "
+                "JOIN private_conversation_messages m "
+                "ON CASE WHEN json_valid(e.payload_json) "
+                "THEN json_extract(e.payload_json,'$.interaction_id') ELSE NULL END "
+                "=m.interaction_id "
+                "JOIN private_conversations c ON c.conversation_id=m.conversation_id "
+                f"WHERE e.subject_id=? AND e.event_id IN ({placeholders}) "
+                "AND c.status IN ('deleting','deleted')",
+                (subject_id, *event_ids),
+            ).fetchall()
+        }
     categories: set[SourceCategory] = set()
     unclassified_count = 0
     withdrawn_count = 0
@@ -77,9 +99,7 @@ def classify_source_event_ids_json(
         if row is None:
             unclassified_count += 1
             continue
-        try:
-            assert_event_sources_available(connection, subject_id, event_id)
-        except PermissionError:
+        if event_id in withdrawn_ids:
             withdrawn_count += 1
             continue
         category = _classify_event(str(row["event_type"]), str(row["source"]))
@@ -137,6 +157,8 @@ def _parse_event_ids(value: object) -> tuple[str, ...] | None:
 def _classify_event(event_type: str, source: str) -> SourceCategory | None:
     if event_type in {"interaction_received", "human_message"} and source == "human":
         return SourceCategory.HUMAN_INTERACTION
+    if event_type == "assistance_reply" and source == "participant":
+        return SourceCategory.HUMAN_ASSISTANCE_REPLY
     if event_type == "world_observation" and source == "safe_web_reader":
         return SourceCategory.EXTERNAL_OBSERVATION
     return None

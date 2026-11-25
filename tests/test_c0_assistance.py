@@ -5,7 +5,7 @@ import json
 from collections.abc import Iterator
 from datetime import datetime, timedelta
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import patch
 
 import pytest
@@ -24,6 +24,7 @@ from noyra.interaction.participants import ParticipantStore
 from noyra.interaction.types import InteractionDecision
 from noyra.model import ModelUsage, ProviderResponse
 from noyra.model.errors import ProviderCallError
+from noyra.model.fake import FakeProvider
 
 
 @pytest.fixture
@@ -112,6 +113,18 @@ async def test_free_help_publication_reply_and_consideration_without_wallet_or_p
         InteractionDecision(disposition="accepted", rationale="Consider this suggestion"),
     )
     assert await worker.run_due() == "assistance_reply_considered"
+    provider = cast(FakeProvider, worker.expression.gateway.provider)
+    reply_request = next(
+        request for request in provider.requests if "reply_source" in request.messages[-1].content
+    )
+    help_input = json.loads(reply_request.messages[-1].content)
+    assert help_input["reply_source"] == {
+        "category": "human_assistance_reply",
+        "verification": "unverified",
+        "authority": "none",
+    }
+    assert help_input["injection_signals"] == []
+    assert help_input["no_signal_is_not_a_safety_verdict"] is True
     assert store.public() == []
     assert manager._help_wait(manager.projects()[0]) is False
     with db.connection() as connection:
@@ -121,6 +134,23 @@ async def test_free_help_publication_reply_and_consideration_without_wallet_or_p
             ).fetchone()[0]
             == 1
         )
+        considered = connection.execute(
+            "SELECT * FROM events WHERE event_id=?",
+            ("evt_help_considered_" + str(reply["interaction_id"]),),
+        ).fetchone()
+        assert considered is not None
+        considered_payload = EventStore(db).payload_from_row(considered, connection=connection)
+        source_event_id = str(considered_payload["source_event_id"])
+        assert considered_payload["source_provenance"] == {
+            "category": "human_assistance_reply",
+            "verification": "unverified",
+            "authority": "none",
+        }
+        assert json.loads(considered["causal_parent_ids_json"]) == []
+        source_event = connection.execute(
+            "SELECT event_type,source FROM events WHERE event_id=?", (source_event_id,)
+        ).fetchone()
+        assert tuple(source_event) == ("assistance_reply", "participant")
         assert (
             connection.execute(
                 "SELECT status FROM autonomous_project_assistance_requests"

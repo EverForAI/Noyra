@@ -58,16 +58,19 @@ def test_classifies_only_exact_known_direct_event_source_pairs() -> None:
     connection = _connection()
     _insert_event(connection, "evt-human", "interaction_received", "human")
     _insert_event(connection, "evt-legacy-human", "human_message", "human")
+    _insert_event(connection, "evt-help", "assistance_reply", "participant")
     _insert_event(connection, "evt-world", "world_observation", "safe_web_reader")
     try:
         human = classify_source_event_ids_json(connection, "subject-1", _encode(["evt-human"]))
         legacy_human = classify_source_event_ids_json(
             connection, "subject-1", _encode(["evt-legacy-human"])
         )
+        help_reply = classify_source_event_ids_json(connection, "subject-1", _encode(["evt-help"]))
         world = classify_source_event_ids_json(connection, "subject-1", _encode(["evt-world"]))
         assert human.status is SourceProvenanceStatus.DIRECT_REFERENCES_CLASSIFIED
         assert legacy_human.categories == (SourceCategory.HUMAN_INTERACTION,)
         assert human.categories == (SourceCategory.HUMAN_INTERACTION,)
+        assert help_reply.categories == (SourceCategory.HUMAN_ASSISTANCE_REPLY,)
         assert world.status is SourceProvenanceStatus.DIRECT_REFERENCES_CLASSIFIED
         assert world.categories == (SourceCategory.EXTERNAL_OBSERVATION,)
         assert human.lineage_scope == "direct_event_references_only"
@@ -179,6 +182,64 @@ def test_withdrawn_private_source_is_not_reported_as_classified() -> None:
         assert provenance.categories == (SourceCategory.UNKNOWN,)
         assert provenance.withdrawn_count == 1
         assert provenance.unclassified_count == 0
+    finally:
+        connection.close()
+
+
+def test_mixed_withdrawn_and_recognized_sources_are_partial() -> None:
+    connection = _connection()
+    _insert_event(connection, "evt-human", "interaction_received", "human")
+    _insert_event(
+        connection,
+        "evt-private",
+        "interaction_received",
+        "human",
+        payload={"interaction_id": "interaction-1"},
+    )
+    connection.execute(
+        "CREATE TABLE private_conversations(conversation_id TEXT PRIMARY KEY, status TEXT NOT NULL)"
+    )
+    connection.execute(
+        "CREATE TABLE private_conversation_messages("
+        "interaction_id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL)"
+    )
+    connection.execute("INSERT INTO private_conversations VALUES('conversation-1','deleted')")
+    connection.execute(
+        "INSERT INTO private_conversation_messages VALUES('interaction-1','conversation-1')"
+    )
+    try:
+        provenance = classify_source_event_ids_json(
+            connection, "subject-1", _encode(["evt-human", "evt-private"])
+        )
+        assert provenance.status is SourceProvenanceStatus.PARTIAL
+        assert set(provenance.categories) == {
+            SourceCategory.HUMAN_INTERACTION,
+            SourceCategory.UNKNOWN,
+        }
+        assert provenance.withdrawn_count == 1
+    finally:
+        connection.close()
+
+
+def test_malformed_event_payload_does_not_break_source_classification() -> None:
+    connection = _connection()
+    connection.execute(
+        "INSERT INTO events(event_id,subject_id,event_type,source,payload_json) "
+        "VALUES ('evt-malformed','subject-1','interaction_received','human','{')"
+    )
+    connection.execute(
+        "CREATE TABLE private_conversations(conversation_id TEXT PRIMARY KEY, status TEXT NOT NULL)"
+    )
+    connection.execute(
+        "CREATE TABLE private_conversation_messages("
+        "interaction_id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL)"
+    )
+    try:
+        provenance = classify_source_event_ids_json(
+            connection, "subject-1", _encode(["evt-malformed"])
+        )
+        assert provenance.status is SourceProvenanceStatus.DIRECT_REFERENCES_CLASSIFIED
+        assert provenance.categories == (SourceCategory.HUMAN_INTERACTION,)
     finally:
         connection.close()
 

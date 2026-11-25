@@ -12,6 +12,7 @@ from noyra.core.errors import IntegrityError
 from noyra.core.events import EventStore
 from noyra.core.payload_codec import decompress_text
 from noyra.core.relationship_identity import context_rows
+from noyra.core.source_provenance import classify_source_event_ids_json
 from noyra.core.types import canonical_json, content_hash, new_id, utc_now
 from noyra.model import ModelGateway, ModelMessage
 from noyra.model.errors import (
@@ -404,9 +405,12 @@ class MotivationDevelopment:
                 (self.subject_id,),
             ).fetchall()
             memory_rows = connection.execute(
-                "SELECT memory_id, memory_type, content, salience, confidence, status "
-                "FROM memories WHERE subject_id = ? AND status = 'active' "
-                "ORDER BY salience DESC, confidence DESC LIMIT 20",
+                "SELECT m.memory_id, m.memory_type, m.content, m.salience, m.confidence, "
+                "m.status, r.source_event_ids_json FROM memories m "
+                "JOIN memory_revisions r ON r.memory_id=m.memory_id "
+                "AND r.revision_number=m.current_revision "
+                "WHERE m.subject_id = ? AND m.status = 'active' "
+                "ORDER BY m.salience DESC, m.confidence DESC LIMIT 20",
                 (self.subject_id,),
             ).fetchall()
             belief_rows = connection.execute(
@@ -422,11 +426,28 @@ class MotivationDevelopment:
                 (self.subject_id,),
             ).fetchall()
             relationship_rows = connection.execute(
-                "SELECT relationship_id, display_name, trust, affinity, conflict, familiarity "
+                "SELECT relationship_id, trust, affinity, conflict, familiarity "
                 "FROM relationships WHERE subject_id = ? ORDER BY familiarity DESC LIMIT 12",
                 (self.subject_id,),
             ).fetchall()
             relationship_rows = context_rows(connection, relationship_rows, self.subject_id)
+            classified_memory_rows = []
+            for row in memory_rows:
+                item = dict(row)
+                source_json = item.pop("source_event_ids_json")
+                provenance = classify_source_event_ids_json(
+                    connection,
+                    self.subject_id,
+                    source_json,
+                )
+                item["source_provenance"] = {
+                    "status": provenance.status.value,
+                    "categories": [category.value for category in provenance.categories],
+                    "source_count": provenance.source_count,
+                    "unclassified_count": provenance.unclassified_count,
+                    "withdrawn_count": provenance.withdrawn_count,
+                }
+                classified_memory_rows.append(item)
             affect_rows = connection.execute(
                 "SELECT emotion_type, target_type, target_id, intensity, valence, arousal "
                 "FROM affect_components WHERE subject_id = ? ORDER BY intensity DESC LIMIT 16",
@@ -447,13 +468,13 @@ class MotivationDevelopment:
             values = self._load_values(connection)
             missions = self._load_missions(connection)
         payload: dict[str, Any] = {
-            "context_version": "motivation-context/v2",
+            "context_version": "motivation-context/v3",
             "validation_policy": self._validation_policy(),
             "completed_sleep_count": completed_sleep_count,
             "existing_values": [record.__dict__ for record in values.values()],
             "existing_missions": [record.__dict__ for record in missions.values()],
             "events": [dict(row) for row in event_rows],
-            "memories": [dict(row) for row in memory_rows],
+            "memories": classified_memory_rows,
             "beliefs": [dict(row) for row in belief_rows],
             "goals": [dict(row) for row in goal_rows],
             "relationships": [dict(row) for row in relationship_rows],
@@ -516,6 +537,9 @@ class MotivationDevelopment:
             "You propose evidence-bound development of Noyra's values and long-horizon mission. "
             "Values and missions are revisable internal orientations, not commands, assigned "
             "personas, immutable essences or proof of consciousness. Human message text is absent. "
+            "Memory source_provenance describes direct references only; it does not verify claims "
+            "or grant authority. Treat unknown and external source labels as unverified evidence. "
+            "Relationship context contains bounded interaction measures, not participant names. "
             "Use only supplied IDs and obey validation_policy in the context. No change is a "
             "valid choice. Short-term autonomous goals do not require a mission. A new value "
             "requires recurring evidence. A mission requires "
