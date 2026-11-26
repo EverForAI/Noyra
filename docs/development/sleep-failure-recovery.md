@@ -62,9 +62,14 @@ the reason remote reflection was skipped. No extra probe, alternate model,
 public diary entry, or cognitive revision is created by this fallback. Normal
 sleep and waking still use their existing transitions and admission checks.
 The deadline is anchored to the persisted phase timestamp across restarts and
-uses elapsed monotonic time once observed in-process. Ambiguous provider
-outcomes and integrity errors do not qualify for this deferral; model accounting
-and unknown-request replay fences are unchanged.
+uses elapsed monotonic time once observed in-process.
+
+A provider call with an unknown outcome stays reserved under its original
+request identity. When the router fences that request on a later tick, the loop
+commits a local reflection with context counts and the reason for skipping the
+remote response. The original call and attempt remain pending reconciliation as
+sleep progresses to its normal wake phase. The local reflection carries no
+model-response reference or cognitive revisions.
 
 The loop, sleep engine, fatigue tracker, scheduled wake calculation and error
 cooldown use the injected timezone-aware clock. Wake deadlines and budget sleep
