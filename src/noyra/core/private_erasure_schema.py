@@ -5,6 +5,7 @@ from .types import content_hash
 ERASED_REFLECTION_PLAN = '{"privacy_erased":true}'
 ERASED_REFLECTION_HASH = content_hash({"privacy_erased": True})
 ERASED_CONTENT_HASH = content_hash("[erased]")
+ERASED_ENTITY_KEY_PREFIX = "[erased]:"
 
 MIGRATION_V120 = f"""
 DROP TRIGGER IF EXISTS prevent_sleep_reflection_update;
@@ -429,4 +430,123 @@ WHEN EXISTS(SELECT 1 FROM private_erasure_receipts r
   AND NEW.reason='privacy erasure'
  )
 BEGIN SELECT RAISE(ABORT,'erased memory block cannot receive new content'); END;
+"""
+
+
+MIGRATION_V125 = """
+CREATE TRIGGER IF NOT EXISTS preserve_entity_creation_evidence
+BEFORE UPDATE OF creation_evidence_json ON entities
+WHEN NEW.creation_evidence_json IS NOT NULL
+ AND NEW.creation_evidence_json IS NOT OLD.creation_evidence_json
+BEGIN SELECT RAISE(ABORT,'entity creation evidence cannot be added or edited'); END;
+CREATE TRIGGER IF NOT EXISTS invalidate_entity_creation_evidence
+AFTER UPDATE OF state_hash ON entities
+WHEN NEW.state_hash IS NOT OLD.state_hash AND NEW.creation_evidence_json IS NOT NULL
+BEGIN UPDATE entities SET creation_evidence_json=NULL WHERE entity_id=NEW.entity_id; END;
+
+CREATE INDEX IF NOT EXISTS idx_private_erasure_receipts_job_table_record
+ ON private_erasure_receipts(job_id,record_table,record_id);
+
+DROP TRIGGER IF EXISTS prevent_entity_evidence_link_update;
+CREATE TRIGGER prevent_entity_evidence_link_update
+BEFORE UPDATE ON entity_evidence_links
+WHEN NOT (
+ NEW.link_id IS OLD.link_id
+ AND NEW.subject_id IS OLD.subject_id
+ AND NEW.entity_id IS OLD.entity_id
+ AND NEW.source_type IS OLD.source_type
+ AND NEW.created_at='[erased]'
+ AND substr(NEW.source_id,1,9)='[erased]:'
+ AND length(NEW.source_id)=73
+ AND substr(NEW.source_id,10) NOT GLOB '*[^0-9a-f]*'
+ AND NEW.role='[erased]'
+ AND NEW.confidence=0
+ AND EXISTS(
+  SELECT 1 FROM private_erasure_receipts r
+  JOIN private_erasure_jobs j ON j.job_id=r.job_id
+  WHERE r.record_table='entity_evidence_links'
+   AND r.record_id=OLD.link_id
+   AND r.original_hash=OLD.state_hash
+   AND r.erased_hash=NEW.state_hash
+   AND j.subject_id=OLD.subject_id
+   AND j.status='running'
+   AND j.stage='content'
+ )
+)
+BEGIN SELECT RAISE(ABORT,'entity evidence links require explicit content erasure'); END;
+
+DROP TRIGGER IF EXISTS prevent_entity_relation_update;
+CREATE TRIGGER prevent_entity_relation_update
+BEFORE UPDATE ON entity_relations
+WHEN NOT (
+ NEW.relation_id IS OLD.relation_id
+ AND NEW.subject_id IS OLD.subject_id
+ AND NEW.source_entity_id IS OLD.source_entity_id
+ AND NEW.target_entity_id IS OLD.target_entity_id
+ AND substr(NEW.observed_at,1,9)='[erased]:'
+ AND length(NEW.observed_at)=73
+ AND substr(NEW.observed_at,10) NOT GLOB '*[^0-9a-f]*'
+ AND NEW.relation_type='[erased]'
+ AND NEW.valid_from IS NULL
+ AND NEW.valid_until IS NULL
+ AND NEW.confidence=0
+ AND NEW.status='contradicted'
+ AND NEW.source_event_ids_json='["[erased]"]'
+ AND EXISTS(
+  SELECT 1 FROM private_erasure_receipts r
+  JOIN private_erasure_jobs j ON j.job_id=r.job_id
+  WHERE r.record_table='entity_relations'
+   AND r.record_id=OLD.relation_id
+   AND r.original_hash=OLD.state_hash
+   AND r.erased_hash=NEW.state_hash
+   AND j.subject_id=OLD.subject_id
+   AND j.status='running'
+   AND j.stage='content'
+ )
+)
+BEGIN SELECT RAISE(ABORT,'entity relations require explicit content erasure'); END;
+
+CREATE TRIGGER IF NOT EXISTS prevent_erased_entity_update
+BEFORE UPDATE ON entities
+WHEN EXISTS(SELECT 1 FROM private_erasure_receipts r
+ WHERE r.record_table='entities' AND r.record_id=OLD.entity_id)
+ AND NOT (
+  NEW.entity_id IS OLD.entity_id
+  AND NEW.subject_id IS OLD.subject_id
+  AND NEW.entity_type='[erased]'
+  AND substr(NEW.canonical_key,1,9)='[erased]:'
+  AND length(NEW.canonical_key)=73
+  AND substr(NEW.canonical_key,10) NOT GLOB '*[^0-9a-f]*'
+  AND NEW.display_name='[erased]'
+  AND NEW.aliases_json='[]'
+  AND NEW.confidence=0
+  AND NEW.first_seen_at='[erased]'
+  AND NEW.last_seen_at='[erased]'
+  AND NEW.creation_evidence_json IS NULL
+  AND EXISTS(
+   SELECT 1 FROM private_erasure_receipts r
+   JOIN private_erasure_jobs j ON j.job_id=r.job_id
+   WHERE r.record_table='entities'
+    AND r.record_id=OLD.entity_id
+    AND r.original_hash=OLD.state_hash
+    AND r.erased_hash=NEW.state_hash
+    AND j.subject_id=OLD.subject_id
+    AND j.status='running'
+    AND j.stage='content'
+  )
+ )
+BEGIN SELECT RAISE(ABORT,'erased entity content cannot be restored'); END;
+
+CREATE TRIGGER IF NOT EXISTS prevent_erased_entity_evidence_link_insert
+BEFORE INSERT ON entity_evidence_links
+WHEN EXISTS(SELECT 1 FROM private_erasure_receipts r
+ WHERE r.record_table='entities' AND r.record_id=NEW.entity_id)
+BEGIN SELECT RAISE(ABORT,'erased entity cannot receive evidence'); END;
+
+CREATE TRIGGER IF NOT EXISTS prevent_erased_entity_relation_insert
+BEFORE INSERT ON entity_relations
+WHEN EXISTS(SELECT 1 FROM private_erasure_receipts r
+ WHERE r.record_table='entities'
+   AND r.record_id IN (NEW.source_entity_id,NEW.target_entity_id))
+BEGIN SELECT RAISE(ABORT,'erased entity cannot receive relations'); END;
 """

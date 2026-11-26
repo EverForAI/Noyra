@@ -16,8 +16,19 @@ from typing import TYPE_CHECKING, Any
 
 from noyra.core.errors import IntegrityError, NotFoundError, PayloadLimitError
 from noyra.core.payload_codec import decompress_text
-from noyra.core.private_erasure_schema import ERASED_REFLECTION_HASH, ERASED_REFLECTION_PLAN
-from noyra.core.types import canonical_json, content_hash, new_id, strict_json_loads, utc_now
+from noyra.core.private_erasure_schema import (
+    ERASED_ENTITY_KEY_PREFIX,
+    ERASED_REFLECTION_HASH,
+    ERASED_REFLECTION_PLAN,
+)
+from noyra.core.types import (
+    canonical_json,
+    content_hash,
+    new_id,
+    strict_int,
+    strict_json_loads,
+    utc_now,
+)
 
 from .conversations import ConversationConflict, _row
 from .reflection_erasure_scope import sleep_reflection_scope
@@ -29,9 +40,24 @@ if TYPE_CHECKING:
 
 ERASED = "[erased]"
 ERASED_MODEL = {"privacy_erased": True}
+ERASED_ENTITY_TIME = ERASED
 MAX_ERASURE_ROWS = 20_000
 MAX_REVIEW_SECONDS = 5
 MAX_REFLECTION_BYTES = 8_000_000
+
+
+def _erased_entity_key(entity_id: str) -> str:
+    return f"{ERASED_ENTITY_KEY_PREFIX}{content_hash(entity_id)}"
+
+
+def _erased_relation_time(relation_id: str) -> str:
+    return f"{ERASED_ENTITY_KEY_PREFIX}{content_hash(relation_id)}"
+
+
+def _erased_evidence_source_id(link_id: str) -> str:
+    return f"{ERASED_ENTITY_KEY_PREFIX}{content_hash(link_id)}"
+
+
 _REVIEW_CODES = frozenset(
     {
         "private_erasure_scope_exceeds_limit",
@@ -62,9 +88,6 @@ _UNREVIEWED_DOMAINS = (
     "thought_episodes",
     "relationship_social_runs",
     "psychological_snapshots",
-    "entities",
-    "entity_relations",
-    "entity_evidence_links",
     "public_diary_entries",
     "consciousness_frames",
     "actions",
@@ -108,6 +131,9 @@ class _ErasureScope:
     discard_only_memory_ids: set[str]
     memory_block_revisions: dict[str, sqlite3.Row]
     memory_block_current_rows: dict[str, sqlite3.Row]
+    entity_rows: dict[str, sqlite3.Row]
+    entity_relation_rows: dict[str, sqlite3.Row]
+    entity_evidence_rows: dict[str, sqlite3.Row]
 
 
 class ConversationErasure:
@@ -299,6 +325,9 @@ class ConversationErasure:
                     or scope.memory_integration_revision_rows
                     or scope.memory_block_revisions
                     or scope.memory_block_current_rows
+                    or scope.entity_rows
+                    or scope.entity_relation_rows
+                    or scope.entity_evidence_rows
                 ):
                     connection.execute("PRAGMA secure_delete=ON")
                 if scope.reflection_hashes:
@@ -401,6 +430,7 @@ class ConversationErasure:
                     )
                     self._erase_memory_integrations(connection, result["job_id"], scope)
                 counts.update(self._erase_memory_blocks(connection, result["job_id"], scope))
+                counts.update(self._erase_entity_graph(connection, result["job_id"], scope))
                 counts.update(
                     self._erase_affected_memories(connection, result["job_id"], subject_id, scope)
                 )
@@ -490,6 +520,14 @@ class ConversationErasure:
             job_id,
             set(scope.memory_block_revisions),
             set(scope.memory_block_current_rows),
+        )
+        ConversationErasure._verify_erased_entity_graph(
+            connection,
+            subject,
+            job_id,
+            set(scope.entity_rows),
+            set(scope.entity_relation_rows),
+            set(scope.entity_evidence_rows),
         )
         sleep_ids = ConversationErasure._verify_reflection_receipts(
             connection, subject, window, job_id, len(scope.reflection_hashes)
@@ -746,6 +784,169 @@ class ConversationErasure:
                 raise IntegrityError("private erasure memory block evidence mismatch")
 
     @staticmethod
+    def _verify_erased_entity_graph(
+        connection: sqlite3.Connection,
+        subject: str,
+        job_id: str,
+        entity_ids: set[str],
+        relation_ids: set[str],
+        evidence_ids: set[str],
+    ) -> None:
+        from noyra.mind.entities import EntityStore
+        from noyra.mind.memory import MemoryStore
+
+        receipt_sets = {
+            "entities": {
+                row["record_id"]: row
+                for row in connection.execute(
+                    "SELECT record_id,original_hash,erased_hash FROM private_erasure_receipts "
+                    "WHERE job_id=? AND record_table='entities' LIMIT ?",
+                    (job_id, MAX_ERASURE_ROWS + 1),
+                )
+            },
+            "entity_relations": {
+                row["record_id"]: row
+                for row in connection.execute(
+                    "SELECT record_id,original_hash,erased_hash FROM private_erasure_receipts "
+                    "WHERE job_id=? AND record_table='entity_relations' LIMIT ?",
+                    (job_id, MAX_ERASURE_ROWS + 1),
+                )
+            },
+            "entity_evidence_links": {
+                row["record_id"]: row
+                for row in connection.execute(
+                    "SELECT record_id,original_hash,erased_hash FROM private_erasure_receipts "
+                    "WHERE job_id=? AND record_table='entity_evidence_links' LIMIT ?",
+                    (job_id, MAX_ERASURE_ROWS + 1),
+                )
+            },
+        }
+        if (
+            set(receipt_sets["entities"]) != entity_ids
+            or set(receipt_sets["entity_relations"]) != relation_ids
+            or set(receipt_sets["entity_evidence_links"]) != evidence_ids
+            or max(len(entity_ids), len(relation_ids), len(evidence_ids)) > MAX_ERASURE_ROWS
+        ):
+            raise IntegrityError("private erasure entity receipt scope mismatch")
+
+        for entity_id in sorted(entity_ids):
+            receipt = receipt_sets["entities"][entity_id]
+            row = connection.execute(
+                "SELECT * FROM entities WHERE entity_id=? AND subject_id=?",
+                (entity_id, subject),
+            ).fetchone()
+            if (
+                row is None
+                or row["entity_type"] != ERASED
+                or row["canonical_key"] != _erased_entity_key(entity_id)
+                or row["display_name"] != ERASED
+                or row["creation_evidence_json"] is not None
+                or row["first_seen_at"] != ERASED_ENTITY_TIME
+                or row["last_seen_at"] != ERASED_ENTITY_TIME
+            ):
+                raise IntegrityError("private erasure entity residual")
+            aliases = strict_json_loads(row["aliases_json"])
+            if aliases != [] or float(row["confidence"]) != 0:
+                raise IntegrityError("private erasure entity evidence residual")
+            expected = EntityStore._state_hash(
+                row["entity_id"],
+                ERASED,
+                _erased_entity_key(entity_id),
+                ERASED,
+                (),
+                0.0,
+                ERASED_ENTITY_TIME,
+                ERASED_ENTITY_TIME,
+            )
+            if (
+                row["state_hash"] != expected
+                or receipt["erased_hash"] != expected
+                or receipt["original_hash"] == expected
+                or not MemoryStore._valid_hash(receipt["original_hash"])
+            ):
+                raise IntegrityError("private erasure entity evidence mismatch")
+            EntityStore._entity_from_row(row)
+
+        for relation_id in sorted(relation_ids):
+            receipt = receipt_sets["entity_relations"][relation_id]
+            row = connection.execute(
+                "SELECT * FROM entity_relations WHERE relation_id=? AND subject_id=?",
+                (relation_id, subject),
+            ).fetchone()
+            if (
+                row is None
+                or row["relation_type"] != ERASED
+                or row["source_entity_id"] not in entity_ids
+                or row["target_entity_id"] not in entity_ids
+            ):
+                raise IntegrityError("private erasure entity relation residual")
+            erased_observed_at = _erased_relation_time(relation_id)
+            if (
+                row["observed_at"] != erased_observed_at
+                or row["valid_from"] is not None
+                or row["valid_until"] is not None
+                or float(row["confidence"]) != 0
+                or row["status"] != "contradicted"
+                or row["source_event_ids_json"] != canonical_json([ERASED])
+            ):
+                raise IntegrityError("private erasure entity relation evidence residual")
+            expected = content_hash(
+                {
+                    "source_entity_id": row["source_entity_id"],
+                    "relation_type": ERASED,
+                    "target_entity_id": row["target_entity_id"],
+                    "valid_from": None,
+                    "valid_until": None,
+                    "observed_at": erased_observed_at,
+                    "confidence": 0.0,
+                    "status": "contradicted",
+                    "source_event_ids": [ERASED],
+                }
+            )
+            if (
+                row["state_hash"] != expected
+                or receipt["erased_hash"] != expected
+                or receipt["original_hash"] == expected
+                or not MemoryStore._valid_hash(receipt["original_hash"])
+            ):
+                raise IntegrityError("private erasure entity relation evidence mismatch")
+            EntityStore._relation_from_row(row)
+
+        for link_id in sorted(evidence_ids):
+            receipt = receipt_sets["entity_evidence_links"][link_id]
+            row = connection.execute(
+                "SELECT * FROM entity_evidence_links WHERE link_id=? AND subject_id=?",
+                (link_id, subject),
+            ).fetchone()
+            erased_source_id = _erased_evidence_source_id(link_id)
+            if (
+                row is None
+                or row["source_id"] != erased_source_id
+                or row["role"] != ERASED
+                or row["source_type"] != "event"
+                or row["entity_id"] not in entity_ids
+            ):
+                raise IntegrityError("private erasure entity evidence link residual")
+            if float(row["confidence"]) != 0 or row["created_at"] != ERASED_ENTITY_TIME:
+                raise IntegrityError("private erasure entity evidence link metadata residual")
+            expected = content_hash(
+                {
+                    "entity_id": row["entity_id"],
+                    "source_type": row["source_type"],
+                    "source_id": erased_source_id,
+                    "role": ERASED,
+                    "confidence": 0.0,
+                }
+            )
+            if (
+                row["state_hash"] != expected
+                or receipt["erased_hash"] != expected
+                or receipt["original_hash"] == expected
+                or not MemoryStore._valid_hash(receipt["original_hash"])
+            ):
+                raise IntegrityError("private erasure entity evidence link mismatch")
+
+    @staticmethod
     def _verify_memory_integration_receipts(
         connection: sqlite3.Connection,
         subject: str,
@@ -842,7 +1043,8 @@ class ConversationErasure:
 
     def _verify_completed_receipts(
         self, subject: str, window: str, job: dict[str, Any]
-    ) -> tuple[int, int, int, int, int]:
+    ) -> tuple[bool, bool]:
+        """Report whether restore must rebuild FTS and compact the SQLite image."""
         counts = job["counts"]
         if not isinstance(counts, dict):
             raise IntegrityError("private erasure memory receipt counts are invalid")
@@ -861,6 +1063,9 @@ class ConversationErasure:
         integration_revisions = counts.get("memory_integration_revisions", 0)
         memory_block_revisions = counts.get("memory_block_revisions", 0)
         memory_blocks = counts.get("memory_blocks", 0)
+        entity_records = counts.get("entity_records", 0)
+        entity_relations = counts.get("entity_relations", 0)
+        entity_evidence_links = counts.get("entity_evidence_links", 0)
         if any(
             type(value) is not int or value < 0
             for value in (
@@ -869,6 +1074,9 @@ class ConversationErasure:
                 integration_revisions,
                 memory_block_revisions,
                 memory_blocks,
+                entity_records,
+                entity_relations,
+                entity_evidence_links,
             )
         ):
             raise IntegrityError("private erasure downstream receipt counts are invalid")
@@ -926,12 +1134,57 @@ class ConversationErasure:
             self._verify_erased_memory_blocks(
                 connection, subject, job_id, block_revision_ids, current_block_ids
             )
+            entity_ids = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT record_id FROM private_erasure_receipts "
+                    "WHERE job_id=? AND record_table='entities' LIMIT ?",
+                    (job_id, MAX_ERASURE_ROWS + 1),
+                )
+            }
+            relation_ids = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT record_id FROM private_erasure_receipts "
+                    "WHERE job_id=? AND record_table='entity_relations' LIMIT ?",
+                    (job_id, MAX_ERASURE_ROWS + 1),
+                )
+            }
+            evidence_ids = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT record_id FROM private_erasure_receipts "
+                    "WHERE job_id=? AND record_table='entity_evidence_links' LIMIT ?",
+                    (job_id, MAX_ERASURE_ROWS + 1),
+                )
+            }
+            if (
+                len(entity_ids) != entity_records
+                or len(relation_ids) != entity_relations
+                or len(evidence_ids) != entity_evidence_links
+            ):
+                raise IntegrityError("private erasure entity receipt counts do not match")
+            self._verify_erased_entity_graph(
+                connection,
+                subject,
+                job_id,
+                entity_ids,
+                relation_ids,
+                evidence_ids,
+            )
         return (
-            reflections,
-            sleep_memories,
-            integration_records,
-            integration_revisions,
-            len(memory_ids),
+            bool(sleep_memories or memory_ids),
+            bool(
+                reflections
+                or integration_records
+                or integration_revisions
+                or memory_ids
+                or block_revision_ids
+                or current_block_ids
+                or entity_ids
+                or relation_ids
+                or evidence_ids
+            ),
         )
 
     @staticmethod
@@ -1065,6 +1318,12 @@ class ConversationErasure:
                 events | reflection_events,
                 memory_ids,
             )
+            entity_rows, entity_relation_rows, entity_evidence_rows = self._review_entity_graph(
+                connection,
+                subject,
+                events | reflection_events,
+                deadline,
+            )
             return _ErasureScope(
                 messages,
                 calls,
@@ -1078,6 +1337,9 @@ class ConversationErasure:
                 discard_only_memory_ids,
                 memory_block_revisions,
                 memory_block_current_rows,
+                entity_rows,
+                entity_relation_rows,
+                entity_evidence_rows,
             )
         except sqlite3.OperationalError as error:
             if time.monotonic() > deadline:
@@ -1130,6 +1392,226 @@ class ConversationErasure:
         if len(candidates) > MAX_ERASURE_ROWS:
             raise ErasureReviewRequired("private_erasure_scope_exceeds_limit")
         return candidates, current_rows
+
+    @staticmethod
+    def _review_entity_graph(
+        connection: sqlite3.Connection,
+        subject: str,
+        tainted_events: set[str],
+        deadline: float,
+    ) -> tuple[dict[str, sqlite3.Row], dict[str, sqlite3.Row], dict[str, sqlite3.Row]]:
+        from noyra.core.events import EventStore
+        from noyra.mind.entities import EntityStore
+
+        entities = connection.execute(
+            "SELECT * FROM entities WHERE subject_id=? ORDER BY entity_id LIMIT ?",
+            (subject, MAX_ERASURE_ROWS + 1),
+        ).fetchall()
+        links = connection.execute(
+            "SELECT * FROM entity_evidence_links WHERE subject_id=? "
+            "ORDER BY entity_id,link_id LIMIT ?",
+            (subject, MAX_ERASURE_ROWS + 1),
+        ).fetchall()
+        relations = connection.execute(
+            "SELECT * FROM entity_relations WHERE subject_id=? ORDER BY relation_id LIMIT ?",
+            (subject, MAX_ERASURE_ROWS + 1),
+        ).fetchall()
+
+        prior_receipts = connection.execute(
+            "SELECT r.job_id,r.record_table,r.record_id,j.status,j.stage,j.counts_json "
+            "FROM private_erasure_jobs j JOIN private_erasure_receipts r "
+            "ON r.job_id=j.job_id WHERE j.subject_id=? AND r.record_table IN "
+            "('entities','entity_relations','entity_evidence_links') "
+            "ORDER BY r.job_id,r.record_table,r.record_id LIMIT ?",
+            (subject, 3 * MAX_ERASURE_ROWS + 1),
+        ).fetchall()
+        if len(prior_receipts) > 3 * MAX_ERASURE_ROWS:
+            raise ErasureReviewRequired("private_erasure_scope_exceeds_limit")
+        prior_by_job: dict[str, dict[str, Any]] = {}
+        for receipt in prior_receipts:
+            job_id = str(receipt["job_id"])
+            group = prior_by_job.setdefault(
+                job_id,
+                {
+                    "status": receipt["status"],
+                    "stage": receipt["stage"],
+                    "counts_json": receipt["counts_json"],
+                    "entities": set(),
+                    "entity_relations": set(),
+                    "entity_evidence_links": set(),
+                },
+            )
+            group[str(receipt["record_table"])].add(str(receipt["record_id"]))
+        prior_entity_ids: set[str] = set()
+        prior_relation_ids: set[str] = set()
+        prior_link_ids: set[str] = set()
+        for job_id, group in prior_by_job.items():
+            if group["status"] != "completed" or group["stage"] != "verified":
+                raise ErasureReviewRequired("private_memory_derivative_review_required")
+            try:
+                old_counts = strict_json_loads(group["counts_json"])
+            except (TypeError, ValueError) as error:
+                raise IntegrityError("prior entity erasure counts are invalid") from error
+            if not isinstance(old_counts, dict) or any(
+                type(old_counts.get(key, 0)) is not int
+                or old_counts.get(key, 0) != len(group[table])
+                for key, table in (
+                    ("entity_records", "entities"),
+                    ("entity_relations", "entity_relations"),
+                    ("entity_evidence_links", "entity_evidence_links"),
+                )
+            ):
+                raise IntegrityError("prior entity erasure receipt counts do not match")
+            ConversationErasure._verify_erased_entity_graph(
+                connection,
+                subject,
+                job_id,
+                group["entities"],
+                group["entity_relations"],
+                group["entity_evidence_links"],
+            )
+            prior_entity_ids.update(group["entities"])
+            prior_relation_ids.update(group["entity_relations"])
+            prior_link_ids.update(group["entity_evidence_links"])
+        if prior_entity_ids or prior_relation_ids or prior_link_ids:
+            entities = [row for row in entities if row["entity_id"] not in prior_entity_ids]
+            links = [row for row in links if row["link_id"] not in prior_link_ids]
+            relations = [row for row in relations if row["relation_id"] not in prior_relation_ids]
+        if (
+            max(len(entities), len(links), len(relations)) > MAX_ERASURE_ROWS
+            or len(entities) + len(links) + len(relations) > MAX_ERASURE_ROWS
+        ):
+            raise ErasureReviewRequired("private_erasure_scope_exceeds_limit")
+
+        entity_by_id: dict[str, sqlite3.Row] = {}
+        entity_rows: dict[str, sqlite3.Row] = {}
+        event_source_ids: set[str] = set()
+        source_reference_count = len(links)
+        for row in entities:
+            if time.monotonic() > deadline:
+                raise ErasureReviewRequired("private_erasure_review_deadline")
+            entity = EntityStore._entity_from_row(row)
+            entity_by_id[entity.entity_id] = row
+            # Legacy links and incident relations describe their own evidence.
+            # They cannot establish the origin of the entity's mutable fields.
+            try:
+                evidence_json = row["creation_evidence_json"]
+            except IndexError:
+                # Historical databases do not have the creation evidence column.
+                evidence_json = None
+            if evidence_json is None:
+                raise ErasureReviewRequired("private_memory_derivative_review_required")
+            try:
+                evidence = strict_json_loads(evidence_json)
+            except (TypeError, ValueError) as error:
+                raise IntegrityError("entity creation evidence is invalid") from error
+            if (
+                not isinstance(evidence, dict)
+                or evidence.keys() != {"events", "state_hash"}
+                or evidence["state_hash"] != row["state_hash"]
+            ):
+                raise IntegrityError("entity creation evidence differs from stored state")
+            sources = set(
+                EntityStore._persisted_json_strings(
+                    canonical_json(evidence["events"]), "entity creation events", allow_empty=False
+                )
+            )
+            if len(sources) > 64:
+                raise IntegrityError("entity creation evidence exceeds the source limit")
+            event_source_ids.update(sources)
+            source_reference_count += len(sources)
+            if sources & tainted_events:
+                if not sources <= tainted_events:
+                    raise ErasureReviewRequired("private_memory_derivative_review_required")
+                entity_rows[entity.entity_id] = row
+
+        target_links: dict[str, sqlite3.Row] = {}
+        for index, row in enumerate(links):
+            if index % 128 == 0 and time.monotonic() > deadline:
+                raise ErasureReviewRequired("private_erasure_review_deadline")
+            confidence = EntityStore._persisted_confidence(
+                row["confidence"], f"entity evidence link {row['link_id']} confidence"
+            )
+            expected = content_hash(
+                {
+                    "entity_id": row["entity_id"],
+                    "source_type": row["source_type"],
+                    "source_id": row["source_id"],
+                    "role": row["role"],
+                    "confidence": confidence,
+                }
+            )
+            if expected != row["state_hash"]:
+                raise IntegrityError(f"entity evidence link mismatch: {row['link_id']}")
+            entity_id = str(row["entity_id"])
+            if entity_id not in entity_by_id:
+                raise IntegrityError("entity evidence link owner is unavailable")
+            if row["source_type"] != "event":
+                # Other entity-link types do not yet carry a revision-level direct
+                # source contract that this eraser can prove. Keep them fail-closed.
+                raise ErasureReviewRequired("private_memory_derivative_review_required")
+            source_id = row["source_id"]
+            if not isinstance(source_id, str) or not source_id:
+                raise IntegrityError("entity event evidence reference is invalid")
+            event_source_ids.add(source_id)
+            if (source_id in tainted_events) != (entity_id in entity_rows):
+                raise ErasureReviewRequired("private_memory_derivative_review_required")
+            if source_id in tainted_events:
+                target_links[str(row["link_id"])] = row
+
+        target_relations: dict[str, sqlite3.Row] = {}
+        for index, row in enumerate(relations):
+            if index % 128 == 0 and time.monotonic() > deadline:
+                raise ErasureReviewRequired("private_erasure_review_deadline")
+            source_entity_id = str(row["source_entity_id"])
+            target_entity_id = str(row["target_entity_id"])
+            if source_entity_id not in entity_by_id or target_entity_id not in entity_by_id:
+                raise IntegrityError("entity relation endpoint is unavailable")
+            relation = EntityStore._relation_from_row(row)
+            sources = set(relation.source_event_ids)
+            relation_id = str(row["relation_id"])
+            if len(sources) > 64:
+                raise IntegrityError("entity relation evidence exceeds the source limit")
+            event_source_ids.update(sources)
+            source_reference_count += len(sources)
+            if sources & tainted_events:
+                if (
+                    not sources <= tainted_events
+                    or source_entity_id not in entity_rows
+                    or target_entity_id not in entity_rows
+                ):
+                    raise ErasureReviewRequired("private_memory_derivative_review_required")
+                target_relations[relation_id] = row
+            elif source_entity_id in entity_rows or target_entity_id in entity_rows:
+                raise ErasureReviewRequired("private_memory_derivative_review_required")
+
+        if source_reference_count > MAX_ERASURE_ROWS:
+            raise ErasureReviewRequired("private_erasure_scope_exceeds_limit")
+        if event_source_ids:
+            rows = connection.execute(
+                "SELECT e.*,r.subject_id AS chain_subject,r.sequence_number AS chain_sequence,"
+                "r.previous_root_hash AS chain_previous_root_hash,r.root_hash AS chain_root_hash "
+                "FROM json_each(?) ids JOIN events e ON e.event_id=ids.value "
+                "JOIN event_chain_roots r ON r.event_id=e.event_id AND r.subject_id=e.subject_id "
+                "WHERE e.subject_id=?",
+                (canonical_json(sorted(event_source_ids)), subject),
+            ).fetchall()
+            if len(rows) != len(event_source_ids):
+                raise IntegrityError("entity event evidence chain coverage mismatch")
+            for row in rows:
+                try:
+                    sequence = strict_int(row["chain_sequence"])
+                except (TypeError, ValueError) as error:
+                    raise IntegrityError("entity event evidence sequence is invalid") from error
+                expected = EventStore._chain_hash(row, sequence, row["chain_previous_root_hash"])
+                if (
+                    row["chain_subject"] != subject
+                    or sequence < 1
+                    or row["chain_root_hash"] != expected
+                ):
+                    raise IntegrityError("entity event evidence chain mismatch")
+
+        return entity_rows, target_relations, target_links
 
     @staticmethod
     def _check_derivatives(
@@ -1655,6 +2137,114 @@ class ConversationErasure:
         return {
             "memory_block_revisions": len(scope.memory_block_revisions),
             "memory_blocks": len(scope.memory_block_current_rows),
+        }
+
+    @staticmethod
+    def _erase_entity_graph(
+        connection: sqlite3.Connection, job_id: str, scope: _ErasureScope
+    ) -> dict[str, int]:
+        from noyra.mind.entities import EntityStore
+
+        for entity_id, entity in scope.entity_rows.items():
+            state_hash = EntityStore._state_hash(
+                entity["entity_id"],
+                ERASED,
+                _erased_entity_key(entity_id),
+                ERASED,
+                (),
+                0.0,
+                ERASED_ENTITY_TIME,
+                ERASED_ENTITY_TIME,
+            )
+            ConversationErasure._receipt(
+                connection,
+                job_id,
+                "entities",
+                entity_id,
+                entity["state_hash"],
+                state_hash,
+            )
+            connection.execute(
+                "UPDATE entities SET entity_type=?,canonical_key=?,display_name=?,"
+                "aliases_json='[]',confidence=0,first_seen_at=?,last_seen_at=?,state_hash=?,"
+                "creation_evidence_json=NULL "
+                "WHERE entity_id=?",
+                (
+                    ERASED,
+                    _erased_entity_key(entity_id),
+                    ERASED,
+                    ERASED_ENTITY_TIME,
+                    ERASED_ENTITY_TIME,
+                    state_hash,
+                    entity_id,
+                ),
+            )
+
+        for relation_id, relation in scope.entity_relation_rows.items():
+            erased_observed_at = _erased_relation_time(relation_id)
+            state_hash = content_hash(
+                {
+                    "source_entity_id": relation["source_entity_id"],
+                    "relation_type": ERASED,
+                    "target_entity_id": relation["target_entity_id"],
+                    "valid_from": None,
+                    "valid_until": None,
+                    "observed_at": erased_observed_at,
+                    "confidence": 0.0,
+                    "status": "contradicted",
+                    "source_event_ids": [ERASED],
+                }
+            )
+            ConversationErasure._receipt(
+                connection,
+                job_id,
+                "entity_relations",
+                relation_id,
+                relation["state_hash"],
+                state_hash,
+            )
+            connection.execute(
+                "UPDATE entity_relations SET relation_type=?,valid_from=NULL,valid_until=NULL,"
+                "observed_at=?,confidence=0,status='contradicted',source_event_ids_json=?,"
+                "state_hash=? WHERE relation_id=?",
+                (
+                    ERASED,
+                    erased_observed_at,
+                    canonical_json([ERASED]),
+                    state_hash,
+                    relation_id,
+                ),
+            )
+
+        for link_id, link in scope.entity_evidence_rows.items():
+            erased_source_id = _erased_evidence_source_id(link_id)
+            state_hash = content_hash(
+                {
+                    "entity_id": link["entity_id"],
+                    "source_type": link["source_type"],
+                    "source_id": erased_source_id,
+                    "role": ERASED,
+                    "confidence": 0.0,
+                }
+            )
+            ConversationErasure._receipt(
+                connection,
+                job_id,
+                "entity_evidence_links",
+                link_id,
+                link["state_hash"],
+                state_hash,
+            )
+            connection.execute(
+                "UPDATE entity_evidence_links SET source_id=?,role=?,confidence=0,created_at=?,"
+                "state_hash=? WHERE link_id=?",
+                (erased_source_id, ERASED, ERASED_ENTITY_TIME, state_hash, link_id),
+            )
+
+        return {
+            "entity_records": len(scope.entity_rows),
+            "entity_relations": len(scope.entity_relation_rows),
+            "entity_evidence_links": len(scope.entity_evidence_rows),
         }
 
     def _erase_affected_memories(
@@ -2439,10 +3029,8 @@ def replay_privacy_deletions(current_root: Path, restored_root: Path) -> None:
         return
     database = Database(restored_root / "noyra.sqlite3")
     erasure = ConversationErasure(database)
-    erased_reflections = False
-    erased_sleep_memories = False
-    erased_memory_integrations = False
-    erased_memories = False
+    rebuild_fts = False
+    compact_database = False
     for (subject, window), marker in markers.items():
         erasure._write_marker(subject, window, marker["job_id"])
         with database.connection() as connection:
@@ -2459,22 +3047,16 @@ def replay_privacy_deletions(current_root: Path, restored_root: Path) -> None:
         if job["status"] != "completed":
             raise ErasureReviewRequired("backup_private_deletion_replay_requires_review")
         # Older backups can carry a completion flag from a weaker verifier.
-        (
-            reflections,
-            sleep_memories,
-            integration_records,
-            integration_revisions,
-            memory_records,
-        ) = erasure._verify_completed_receipts(subject, window, job)
-        erased_reflections |= bool(reflections)
-        erased_sleep_memories |= bool(sleep_memories)
-        erased_memory_integrations |= bool(integration_records or integration_revisions)
-        erased_memories |= bool(memory_records)
-    if erased_reflections or erased_memory_integrations or erased_memories:
+        job_rebuild_fts, job_compact_database = erasure._verify_completed_receipts(
+            subject, window, job
+        )
+        rebuild_fts |= job_rebuild_fts
+        compact_database |= job_compact_database
+    if compact_database:
         database.assert_schema_contract()
         if any(restored_root.glob("noyra.sqlite3.pre-migration-v*.bak")):
             raise IntegrityError("private erasure restore contains a pre-migration copy")
-        if erased_sleep_memories or erased_memories:
+        if rebuild_fts:
             # An FTS deletion can leave old posting lists in index segments.
             # Rebuild from the surviving FTS rows in the isolated restore tree.
             with database.transaction() as connection:

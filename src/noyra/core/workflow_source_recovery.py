@@ -100,6 +100,15 @@ _REVIEWED_SCHEMA_PAIRS: tuple[RecoverySchemaPair, ...] = (
         "831e5e2019db93adbd8f48f3d21c0c0d4fed98d185a2158c478f0020f89eca5e",
         "831e5e2019db93adbd8f48f3d21c0c0d4fed98d185a2158c478f0020f89eca5e",
     ),
+    # v125 adds receipt-bound entity graph redaction guards.
+    RecoverySchemaPair(
+        124,
+        "15236fa91cdb81a32b47c3ac83396ca27c241ad1af97f4738da4eda5f9f512ae",
+        125,
+        "1aba05bf9fe7352da25714062ef8653795fd34a85b648b955c9e8f03153118a6",
+        "831e5e2019db93adbd8f48f3d21c0c0d4fed98d185a2158c478f0020f89eca5e",
+        "712899cb5719568a995418cd14be9e497769cd0d7d8807dae815e6f1f6a1e333",
+    ),
 )
 
 

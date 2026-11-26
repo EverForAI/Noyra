@@ -789,6 +789,8 @@ _OWNERSHIP_GRAPHS[123] = {
 }
 # Schema 124 adds guarded memory-block redaction without changing ownership.
 _OWNERSHIP_GRAPHS[124] = _OWNERSHIP_GRAPHS[123]
+# Schema 125 adds guarded entity graph redaction without changing ownership.
+_OWNERSHIP_GRAPHS[125] = _OWNERSHIP_GRAPHS[124]
 
 
 @dataclass(frozen=True)

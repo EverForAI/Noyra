@@ -72,7 +72,9 @@ class EntityStore:
         aliases: tuple[str, ...] = (),
         confidence: float = 0.5,
         seen_at: str | None = None,
+        creation_event_ids: tuple[str, ...] | None = None,
     ) -> EntityRecord:
+        """Optionally attest which events produced all fields of a new entity."""
         self._validate_text(entity_type, canonical_key, display_name)
         self._validate_confidence(confidence)
         normalized_aliases = tuple(
@@ -89,34 +91,48 @@ class EntityStore:
             ).fetchone()
             if row is None:
                 entity_id = new_id("entity")
-                connection.execute(
-                    """INSERT INTO entities(
-                       entity_id, subject_id, entity_type, canonical_key, display_name,
-                       aliases_json, confidence, first_seen_at, last_seen_at, state_hash
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (
-                        entity_id,
-                        subject_id,
-                        entity_type,
-                        canonical_key,
-                        display_name,
-                        canonical_json(list(normalized_aliases)),
-                        confidence,
-                        timestamp,
-                        timestamp,
-                        self._state_hash(
-                            entity_id,
-                            entity_type,
-                            canonical_key,
-                            display_name,
-                            normalized_aliases,
-                            confidence,
-                            timestamp,
-                            timestamp,
-                        ),
-                    ),
+                state_hash = self._state_hash(
+                    entity_id,
+                    entity_type,
+                    canonical_key,
+                    display_name,
+                    normalized_aliases,
+                    confidence,
+                    timestamp,
+                    timestamp,
                 )
+                values = (
+                    entity_id,
+                    subject_id,
+                    entity_type,
+                    canonical_key,
+                    display_name,
+                    canonical_json(list(normalized_aliases)),
+                    confidence,
+                    timestamp,
+                    timestamp,
+                    state_hash,
+                )
+                if creation_event_ids is None:
+                    connection.execute(
+                        "INSERT INTO entities(entity_id,subject_id,entity_type,canonical_key,"
+                        "display_name,aliases_json,confidence,first_seen_at,last_seen_at,"
+                        "state_hash) "
+                        "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                        values,
+                    )
+                else:
+                    sources = validate_event_ids(connection, subject_id, creation_event_ids)
+                    evidence = canonical_json({"events": list(sources), "state_hash": state_hash})
+                    connection.execute(
+                        "INSERT INTO entities(entity_id,subject_id,entity_type,canonical_key,"
+                        "display_name,aliases_json,confidence,first_seen_at,last_seen_at,"
+                        "state_hash,creation_evidence_json) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                        (*values, evidence),
+                    )
             else:
+                if creation_event_ids is not None:
+                    raise ValueError("creation evidence is only accepted for a new entity")
                 entity_id = str(row["entity_id"])
                 previous_aliases = self._aliases(row["aliases_json"])
                 merged_aliases = tuple(dict.fromkeys(previous_aliases + normalized_aliases))
