@@ -40,15 +40,18 @@ from noyra.service import NoyraService, ServiceSettings
 class _Provider:
     name = "shutdown-test"
 
-    def __init__(self, release: threading.Event | None = None) -> None:
+    def __init__(
+        self, release: threading.Event | None = None, *, release_timeout: float | None = 5
+    ) -> None:
         self.release = release
+        self.release_timeout = release_timeout
         self.entered = threading.Event()
         self.calls = 0
 
     def embed(self, texts: Sequence[str]) -> list[list[float]]:
         self.calls += 1
         self.entered.set()
-        if self.release is not None and not self.release.wait(5):
+        if self.release is not None and not self.release.wait(self.release_timeout):
             raise RuntimeError("test watchdog expired")
         return [[1.0, 0.0] for _ in texts]
 
@@ -420,10 +423,12 @@ async def test_service_async_and_sync_close_retain_real_ownership_until_worker_d
     service = NoyraService(settings)
     service.boot()
     release = threading.Event()
-    gateway = _gateway(service.kernel, _Provider(release))
+    # The worker remains in flight until the test explicitly releases it,
+    # even if the real HTTP server takes longer to close.
+    provider = _Provider(release, release_timeout=None)
+    gateway = _gateway(service.kernel, provider)
     cycle = _cycle(service.kernel, gateway)
     service.cognition = cycle
-    _start_timeout(service.kernel, gateway)
     contender = ProcessLock(service.kernel.process_lock.path)
 
     async def stop_loop(stop_event: asyncio.Event) -> None:
@@ -432,14 +437,19 @@ async def test_service_async_and_sync_close_retain_real_ownership_until_worker_d
     monkeypatch.setattr(service, "boot", lambda: None)
     monkeypatch.setattr(service.loop, "run_forever", stop_loop)
     try:
+        _start_timeout(service.kernel, gateway)
+        assert provider.entered.wait(5)
+        # This watchdog covers the entire service, including HTTP shutdown.
         with pytest.raises(ModelGatewayError, match="embedding_shutdown_incomplete"):
-            await asyncio.wait_for(service.run(), timeout=5)
+            await asyncio.wait_for(service.run(), timeout=60)
         assert service.kernel.process_lock.held
         with pytest.raises(RuntimeOwnershipError):
             contender.acquire()
         with pytest.raises(ModelGatewayError, match="embedding_shutdown_incomplete"):
             service.close()
         assert service.kernel.process_lock.held
+        with pytest.raises(RuntimeOwnershipError):
+            contender.acquire()
         assert _usage(service.kernel) == ("unknown", "embedding_hard_timeout")
         release.set()
         assert await gateway.aclose(timeout=2)
