@@ -30,6 +30,7 @@ from noyra.migration.http_executor import (
 )
 from noyra.migration.manager import MigrationTask
 from noyra.wallet.execution import HTTPSWalletSigner
+from noyra.wallet.types import LOCAL_SIGNING_CHAIN_ID
 
 WALLET_ACCOUNT = Account.from_key("11" * 32)
 WALLET_ADDRESS = WALLET_ACCOUNT.address.lower()
@@ -199,6 +200,9 @@ def test_agent_consumes_local_wallet_approval_once(
     create_keystore(wallet_root / "wallet.json", "test-pass-123", private_key="11" * 32)
     (wallet_root / "password").write_text("test-pass-123")
     (wallet_root / "password").chmod(0o600)
+    (wallet_root / "rpc.json").write_text(
+        json.dumps({LOCAL_SIGNING_CHAIN_ID: "https://testnet.example"}), encoding="utf-8"
+    )
     response = agent.binding_proof(request)
     assert response["wallet_binding"]["status"] == "verified"
     assert response["wallet_binding"]["approval_fingerprint"]

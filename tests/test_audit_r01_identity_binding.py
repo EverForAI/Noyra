@@ -6,6 +6,7 @@ import json
 import sqlite3
 import subprocess
 import sys
+import time
 import zipfile
 from contextlib import closing
 from io import BytesIO
@@ -549,4 +550,12 @@ def test_privacy_review_refuses_missing_current_identity_storage(db: Database) -
         db.connection() as c,
         pytest.raises(IntegrityError, match="identity storage is unavailable"),
     ):
-        ConversationErasure._check_derivatives(c, SUBJECT, set(), [])
+        ConversationErasure._check_derivatives(
+            c,
+            SUBJECT,
+            events=set(),
+            reflection_events=set(),
+            reviewed_sleep_checkpoints=False,
+            sleep_memory_links={},
+            deadline=time.monotonic() + 5,
+        )
