@@ -4678,6 +4678,7 @@ def test_sql_progress_shutdown_is_not_an_integrity_finding(tmp_path: Path) -> No
     )
     service = NoyraService(settings)
     entered = threading.Event()
+    clock = datetime(2026, 1, 1, tzinfo=UTC)
     calls = 0
 
     def sql_runner(context: Any) -> IntegrityCheckOutcome:
@@ -4709,20 +4710,20 @@ def test_sql_progress_shutdown_is_not_an_integrity_finding(tmp_path: Path) -> No
         service.kernel,
         tmp_path,
         policy_mode="pause",
-        interval_seconds=0.01,
+        interval_seconds=1,
         registry=registry,
+        clock=lambda: clock,
         checkpoint=service._integrity_checkpoint,
     )
     service.http.integrity = service.integrity
-    service.loop.pre_tick_hook = service._integrity_pre_tick
-    service.loop.next_wakeup_hook = service.integrity.seconds_until_due
 
     async def exercise() -> None:
-        task = asyncio.create_task(service.run())
+        task = asyncio.create_task(service._integrity_pre_tick())
         try:
             await _wait_for_worker_entry(entered, task)
             service.request_shutdown()
-            await asyncio.wait_for(task, timeout=5)
+            result = await asyncio.wait_for(task, timeout=5)
+            assert result is not None and result.action == "shutdown_pending"
 
             assert service.kernel.lifecycle.current().state == "active"
             assert service.integrity.latest_report is not None
@@ -4736,7 +4737,18 @@ def test_sql_progress_shutdown_is_not_an_integrity_finding(tmp_path: Path) -> No
                 with pytest.raises(asyncio.CancelledError):
                     await task
 
-    asyncio.run(exercise())
+    try:
+        # Boot and advance the scheduler before timing the actual worker entry.
+        service.boot()
+        assert service.kernel.lifecycle.current().state == "active"
+        startup = service.integrity.latest_report
+        assert startup is not None and startup.status == "ok"
+        clock += timedelta(seconds=1)
+        asyncio.run(exercise())
+        assert calls == 2
+        assert service.integrity.latest_report == startup
+    finally:
+        service.close()
 
 
 def test_active_tick_stops_before_work_after_shutdown_request(tmp_path: Path) -> None:
