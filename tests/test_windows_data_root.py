@@ -283,7 +283,7 @@ $second=New-NoyraProcessStartInfo $Python $InstallRoot $true
 
 
 @pytest.fixture
-def windows_install(tmp_path: Path) -> dict[str, Path]:
+def windows_install(tmp_path: Path, request: pytest.FixtureRequest) -> dict[str, Path]:
     if os.name != "nt" or POWERSHELL is None:
         pytest.skip("native Windows lifecycle entry requires PowerShell 7")
     import hashlib
@@ -307,7 +307,11 @@ def windows_install(tmp_path: Path) -> dict[str, Path]:
             ),
             encoding="utf-8",
         )
-    values = {"install": tmp_path / "install", "data": tmp_path / "retained", "packages": packages}
+    values = {
+        "install": tmp_path / getattr(request, "param", "install"),
+        "data": tmp_path / "retained",
+        "packages": packages,
+    }
     for version in ("v1", "v2"):
         result = _lifecycle(values, "install", "-PackageRoot", str(packages / version))
         assert result.returncode == 0, result.stdout + result.stderr
@@ -402,6 +406,7 @@ def test_uninstall_cannot_delete_runtime_markers_in_unselected_or_hidden_locatio
     assert _tree_bytes(install) == before
 
 
+@pytest.mark.parametrize("windows_install", ["install-\u6570\u636e-\U0001f30f"], indirect=True)
 def test_legacy_data_diagnostics_and_stop_remain_available(
     windows_install: dict[str, Path],
 ) -> None:

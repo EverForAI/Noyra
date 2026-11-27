@@ -645,6 +645,7 @@ switch ($Action) {
         if ($null -ne $tracked) { $tracked.Dispose() }
         $current = if ($null -ne $script:R03CurrentState) { $script:R03CurrentState.current } else { Get-CurrentVersion }
         $previous = if ($null -ne $script:R03CurrentState) { $script:R03CurrentState.previous } else { Read-Pointer $previousPointer }
+        # Keep JSON paths lossless when redirected through a legacy console code page.
         [pscustomobject]@{
             install_root = $InstallRoot
             data_root = $DataRoot
@@ -659,7 +660,7 @@ switch ($Action) {
             recovery_kind = if ($null -ne $script:R03TransitionState) { $script:R03TransitionState.kind } elseif ($null -ne $script:R03CurrentState -and $null -ne $script:R03CurrentState.intent) { $script:R03CurrentState.intent.kind } else { $null }
             generation = if ($null -ne $script:R03CurrentState) { $script:R03CurrentState.generation } else { $null }
             recovery_required = ($null -ne $script:R03TransitionState -or ($null -ne $script:R03CurrentState -and $script:R03CurrentState.phase -ne 'ready'))
-        } | ConvertTo-Json -Compress
+        } | ConvertTo-Json -Compress -EscapeHandling EscapeNonAscii
     }
 }
 
