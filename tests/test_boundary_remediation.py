@@ -751,6 +751,38 @@ def test_request_head_budget_has_typed_phase_and_bounded_reads(
         assert source.tell() == budget + 1
 
 
+@pytest.mark.parametrize("deadline_expires", [False, True])
+def test_rejected_head_drain_has_a_byte_and_time_limit(
+    monkeypatch: pytest.MonkeyPatch, deadline_expires: bool
+) -> None:
+    import io
+    from unittest.mock import Mock
+
+    from noyra.core.request_io import DeadlineRequestReader, RequestHeadLimitError
+
+    source = io.BytesIO(b"x" * 1024)
+    connection = Mock()
+    reader = DeadlineRequestReader(source, connection, 5, max_header_bytes=64)
+    with io.BufferedReader(reader) as buffered:
+        with pytest.raises(RequestHeadLimitError):
+            buffered.readline()
+        assert source.tell() == 65
+        # A short read leaves both limits in play on the next iteration.
+        original_read = source.read1
+        read = Mock(side_effect=lambda size: original_read(min(16, size)))
+        monkeypatch.setattr(source, "read1", read)
+        monkeypatch.setattr(
+            "noyra.core.request_io.monotonic_time",
+            Mock(side_effect=(0.0, 0.01, 0.03) if deadline_expires else (0.0, 0.01, 0.02)),
+        )
+        reader.discard_pending(max_bytes=20, timeout_seconds=0.025)
+        assert source.tell() == 65 + (16 if deadline_expires else 20)
+        assert [call.args[0] for call in read.call_args_list] == (
+            [20] if deadline_expires else [20, 4]
+        )
+        assert 0 < connection.settimeout.call_args.args[0] <= 0.025
+
+
 @pytest.mark.parametrize("chunk_size", [1, 2, 3, 7, 8192])
 @pytest.mark.parametrize("line_ending", [b"\r\n", b"\n", b"\n\r\n"])
 def test_exact_head_budget_does_not_consume_body_allowance(

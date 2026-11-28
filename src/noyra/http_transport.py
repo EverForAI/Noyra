@@ -72,6 +72,7 @@ if TYPE_CHECKING:
 
 LOGGER = logging.getLogger("noyra.service")
 MAX_REQUEST_HEADER_BYTES = 64_000
+REJECTED_HEAD_DRAIN_SECONDS = 0.025
 
 
 class PublicArticleRenderer(Protocol):
@@ -98,15 +99,14 @@ def handler_type(
         def setup(self) -> None:
             super().setup()
             self.connection.settimeout(owner.settings.request_timeout_seconds)
-            self.rfile = io.BufferedReader(
-                DeadlineRequestReader(
-                    self.rfile,
-                    self.connection,
-                    owner.settings.request_timeout_seconds,
-                    max_bytes=MAX_REQUEST_HEADER_BYTES + owner.settings.max_request_bytes,
-                    max_header_bytes=MAX_REQUEST_HEADER_BYTES,
-                )
+            self._deadline_request_reader = DeadlineRequestReader(
+                self.rfile,
+                self.connection,
+                owner.settings.request_timeout_seconds,
+                max_bytes=MAX_REQUEST_HEADER_BYTES + owner.settings.max_request_bytes,
+                max_header_bytes=MAX_REQUEST_HEADER_BYTES,
             )
+            self.rfile = io.BufferedReader(self._deadline_request_reader)
 
         def handle_one_request(self) -> None:
             self._http_request_id = request_id()
@@ -135,6 +135,14 @@ def handler_type(
                         if error.request_line
                         else HTTPStatus.REQUEST_HEADER_FIELDS_TOO_LARGE
                     )
+                    self.wfile.flush()
+                # Windows may reset a connection closed with unread input,
+                # discarding a rejection response. Drain only a bounded,
+                # short-deadline tail; rejected bytes are never parsed or logged.
+                self._deadline_request_reader.discard_pending(
+                    max_bytes=MAX_REQUEST_HEADER_BYTES,
+                    timeout_seconds=REJECTED_HEAD_DRAIN_SECONDS,
+                )
             except (ConnectionError, TimeoutError):
                 self.close_connection = True
             except Exception as error:
