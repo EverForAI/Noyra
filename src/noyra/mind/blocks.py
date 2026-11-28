@@ -265,9 +265,7 @@ class MemoryBlockStore:
         if not isinstance(source_ids, tuple) or len(source_ids) > cls._MAX_SOURCES:
             raise ValueError(f"memory block {source_kind} source list is invalid")
         if any(
-            not isinstance(source_id, str)
-            or not source_id
-            or source_id != source_id.strip()
+            not isinstance(source_id, str) or not source_id or source_id != source_id.strip()
             for source_id in source_ids
         ):
             raise ValueError(f"memory block {source_kind} source list is invalid")
@@ -599,9 +597,7 @@ class MemoryBlockStore:
         )
 
     @staticmethod
-    def _lineage_hash(
-        lineage_status: str, sources: tuple[MemoryBlockSourceReference, ...]
-    ) -> str:
+    def _lineage_hash(lineage_status: str, sources: tuple[MemoryBlockSourceReference, ...]) -> str:
         return content_hash(
             {
                 "lineage_status": lineage_status,

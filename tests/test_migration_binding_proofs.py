@@ -15,7 +15,7 @@ from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 from eth_account import Account
 from eth_account.messages import encode_defunct
 
-from noyra.core.at_rest import VolumeEncryptionStatus
+from noyra.core.at_rest import VolumeEncryptionStatus, _harden_tree
 from noyra.core.types import canonical_json, content_hash
 from noyra.migration.agent import (
     MigrationAgent,
@@ -199,10 +199,11 @@ def test_agent_consumes_local_wallet_approval_once(
     wallet_root = tmp_path / "restore" / "task-bind-1" / "migration-wallet"
     create_keystore(wallet_root / "wallet.json", "test-pass-123", private_key="11" * 32)
     (wallet_root / "password").write_text("test-pass-123")
-    (wallet_root / "password").chmod(0o600)
     (wallet_root / "rpc.json").write_text(
         json.dumps({LOCAL_SIGNING_CHAIN_ID: "https://testnet.example"}), encoding="utf-8"
     )
+    # Match the restored wallet tree, including sibling files audited by the keystore.
+    _harden_tree(wallet_root)
     response = agent.binding_proof(request)
     assert response["wallet_binding"]["status"] == "verified"
     assert response["wallet_binding"]["approval_fingerprint"]

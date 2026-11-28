@@ -180,8 +180,7 @@ def test_memory_block_lineage_requires_explicit_same_subject_sources() -> None:
         with database.connection() as connection:
             assert connection.execute("SELECT COUNT(*) FROM memory_blocks").fetchone()[0] == 0
             assert (
-                connection.execute("SELECT COUNT(*) FROM memory_block_revisions").fetchone()[0]
-                == 0
+                connection.execute("SELECT COUNT(*) FROM memory_block_revisions").fetchone()[0] == 0
             )
 
 
@@ -209,9 +208,7 @@ def test_memory_block_direct_event_sources_are_chain_bound_and_complete(tmp_path
     assert lineage.event_sources[0].event_id == event.event_id
     assert lineage.event_sources[0].sequence_number > 0
     assert len(lineage.event_sources[0].root_hash) == 64
-    assert MemoryBlockStore(database).verify_integrity(subject_id)[
-        "memory_block_revisions"
-    ] == 1
+    assert MemoryBlockStore(database).verify_integrity(subject_id)["memory_block_revisions"] == 1
 
     with (
         pytest.raises(sqlite3.IntegrityError, match="append-only"),
@@ -248,8 +245,7 @@ def test_memory_block_source_rows_are_append_only(tmp_path: Path) -> None:
         database.transaction() as connection,
     ):
         connection.execute(
-            "DELETE FROM memory_block_revision_sources "
-            "WHERE revision_id=? AND source_memory_id=?",
+            "DELETE FROM memory_block_revision_sources WHERE revision_id=? AND source_memory_id=?",
             tuple(source_row),
         )
     with (
@@ -367,9 +363,7 @@ def test_schema_122_memory_lineage_remains_direct_event_incomplete_after_upgrade
                     now,
                 ),
             )
-            sources = MemoryBlockStore._capture_sources(
-                connection, subject_id, (source.memory_id,)
-            )
+            sources = MemoryBlockStore._capture_sources(connection, subject_id, (source.memory_id,))
             lineage_hash = MemoryBlockStore._lineage_hash("memory", sources)
             connection.execute(
                 "INSERT INTO memory_block_revision_lineage(revision_id,block_id,lineage_status,"
