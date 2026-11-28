@@ -47,6 +47,8 @@ from .execution import (
     WalletSignerError,
     WalletTransferIntent,
     WalletUnsignedTransfer,
+    wallet_signer_is_testnet,
+    wallet_signer_requires_evidence,
 )
 from .keystore import create_keystore, load_account, read_password_file
 from .local import LocalWalletSigner
@@ -171,4 +173,6 @@ __all__ = [
     "create_keystore",
     "load_account",
     "read_password_file",
+    "wallet_signer_is_testnet",
+    "wallet_signer_requires_evidence",
 ]

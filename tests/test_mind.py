@@ -320,6 +320,8 @@ class MindTestCase(unittest.TestCase):
             "current",
             "Current task context.",
             reason="test fixture",
+            source_memory_ids=(),
+            source_event_ids=(),
         )
         with self.database.transaction() as connection:
             connection.execute(

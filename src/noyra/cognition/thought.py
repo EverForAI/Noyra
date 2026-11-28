@@ -14,6 +14,7 @@ from noyra.core.errors import IntegrityError, RuntimeOwnershipError
 from noyra.core.events import EventStore
 from noyra.core.locking import ProcessLock
 from noyra.core.payload_codec import decompress_text
+from noyra.core.private_erasure_schema import ERASED_REFLECTION_HASH
 from noyra.core.relationship_identity import context_rows
 from noyra.core.scheduling_clock import CooldownClock
 from noyra.core.types import canonical_json, content_hash, new_id, utc_now
@@ -852,8 +853,9 @@ class IntrinsicThought:
             questions = connection.execute(
                 """SELECT r.reflection_id, r.unresolved_questions_json
                    FROM sleep_reflections r JOIN sleep_runs s ON s.sleep_id = r.sleep_id
-                   WHERE s.subject_id = ? ORDER BY r.created_at DESC LIMIT 6""",
-                (self.subject_id,),
+                   WHERE s.subject_id = ? AND r.plan_hash != ?
+                   ORDER BY r.created_at DESC LIMIT 6""",
+                (self.subject_id, ERASED_REFLECTION_HASH),
             ).fetchall()
             affects = connection.execute(
                 "SELECT emotion_type, target_key, target_type, target_id, intensity, arousal "

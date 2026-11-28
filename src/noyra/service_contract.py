@@ -427,6 +427,7 @@ API_ROUTE_CONTRACTS: tuple[APIRouteContract, ...] = (
     _get("/api/v1/config/training-policy", "operator", 200, 401),
     _get("/api/v1/config/common-knowledge", "operator", 200, 401),
     _get("/api/v1/config/transports", "operator", 200, 401),
+    _get("/api/v1/config/transports/outreach", "operator", 200, 401),
     _get("/api/v1/config/inbound-bindings", "operator", 200, 401),
     _get("/api/v1/config/identity-challenges/{challengeId}", "operator", 200, 401, 404),
     _post("/api/v1/config/identity-challenges", "operator", 200, 401, 409, 415),

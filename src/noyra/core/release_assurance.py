@@ -23,6 +23,7 @@ CURRENT_PATH = Path("/opt/noyra/current")
 EVIDENCE_NAME = ".noyra-external-gates.json"
 CONTAINER_SOURCE_PATH = Path("/opt/noyra/.noyra-source-sha")
 CONTAINER_EVIDENCE_PATH = Path("/run/noyra/release-assurance")
+_RUNNING_MODULE = Path(__file__).resolve()
 
 
 def controlled_text(path: Path, *, maximum: int) -> str:
@@ -67,7 +68,7 @@ def verify_evidence(
         raise ValueError("release_evidence_invalid:" + ",".join(errors))
 
 
-def current_evidence() -> dict[str, Any]:
+def current_evidence(*, bind_running_build: bool = False) -> dict[str, Any]:
     if os.getenv("NOYRA_DEPLOYMENT_PROFILE", "").strip().lower() == "container_internal":
         # The source marker is baked into the read-only image independently of
         # the mounted evidence; an environment claim cannot replace either.
@@ -81,6 +82,12 @@ def current_evidence() -> dict[str, Any]:
         release = CURRENT_PATH.resolve(strict=True)
         if release.parent != CURRENT_PATH.parent / "releases":
             raise ValueError("release_pointer_unsafe")
+        active_python = Path(__import__("sys").executable).resolve()
+        if bind_running_build and (
+            not active_python.is_relative_to(release / ".venv")
+            or not _RUNNING_MODULE.is_relative_to(release / ".venv")
+        ):
+            raise ValueError("running_build_does_not_match_current_release")
         sha = controlled_text(release / ".noyra-source-sha", maximum=65).strip()
         evidence = release / EVIDENCE_NAME
         public_key_path = PUBLIC_KEY_PATH
@@ -90,9 +97,9 @@ def current_evidence() -> dict[str, Any]:
     return {"status": "verified", "commit_sha": sha, "reviewed_at": record["reviewed_at"]}
 
 
-def activation_status() -> dict[str, Any]:
+def activation_status(*, bind_running_build: bool = False) -> dict[str, Any]:
     try:
-        return current_evidence()
+        return current_evidence(bind_running_build=bind_running_build)
     except Exception:
         return {"status": "unverified", "commit_sha": None, "reviewed_at": None}
 
@@ -109,6 +116,30 @@ def require_activation_evidence(*, production: bool | None = None) -> None:
         current_evidence()
     except Exception:
         raise ValueError("production_release_evidence_required") from None
+
+
+def wallet_automation_opted_in() -> bool:
+    return (
+        os.getenv("NOYRA_WALLET_AUTOMATION_RELEASE_GATE", "").strip().lower() == "external_verified"
+    )
+
+
+def wallet_testnet_opted_in() -> bool:
+    return os.getenv("NOYRA_WALLET_TESTNET_ENABLED", "").strip().lower() == "true" and os.getenv(
+        "NOYRA_PROFILE", ""
+    ).strip().lower() in {"development", "test"}
+
+
+def require_wallet_activation_evidence(*, automatic: bool, testnet: bool = False) -> None:
+    profile = os.getenv("NOYRA_PROFILE", "").strip().lower()
+    if testnet and wallet_testnet_opted_in() and profile in {"development", "test"}:
+        return
+    if automatic and not wallet_automation_opted_in():
+        raise ValueError("wallet_automation_external_gate_opt_in_required")
+    try:
+        current_evidence(bind_running_build=True)
+    except Exception:
+        raise ValueError("wallet_release_evidence_required") from None
 
 
 def github_json(url: str, *, maximum: int = 256_000) -> Any:

@@ -8,7 +8,6 @@ import json
 import math
 import re
 import sqlite3
-import threading
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
@@ -27,6 +26,7 @@ from noyra.core.types import canonical_json, content_hash, strict_json_loads, ut
 
 from .diary import PublicDiaryStore
 from .posts import PublicPostStore
+from .public_cold_reader import COLD_READ_SLOTS as _COLD_READ_SLOTS
 from .public_cold_reader import PublicColdReader
 from .sitemap_tokens import SitemapTokens
 from .store import InteractionStore
@@ -79,9 +79,6 @@ class PublicationCapacityError(ValueError):
 
 class _SegmentPageBoundary(Exception):
     """Continue before the next unverified segment, without skipping it."""
-
-
-_COLD_READ_SLOTS = threading.BoundedSemaphore(2)
 
 
 @dataclass

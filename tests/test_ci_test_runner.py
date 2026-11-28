@@ -46,9 +46,9 @@ def test_ci_inventory_cannot_accept_missing_or_duplicate_tests(tmp_path: Path, d
             runner.verify_manifests(tmp_path, 2)
 
 
-@pytest.mark.parametrize("fail", [False, True])
+@pytest.mark.parametrize("fail,encoding", [(False, "utf-8"), (True, "utf-8"), (True, "gbk")])
 def test_ci_runner_runs_every_test_and_propagates_worker_failure(
-    tmp_path: Path, fail: bool
+    tmp_path: Path, fail: bool, encoding: str
 ) -> None:
     # Root the synthetic suite here so node IDs are identical on both platforms.
     names: list[str] = []
@@ -61,11 +61,12 @@ def test_ci_runner_runs_every_test_and_propagates_worker_failure(
         names = names[: (index + 1) * 2]
     assert len(names) == len(set(names)) == 4
     sample = tmp_path / "test_sample.py"
+    failure_message = "intentional CI worker failure \ufffd"
     sample.write_text(
         "from noyra.core.types import content_hash\n\n"
         + "\n\n".join(
             f"def {name}():\n    assert len(content_hash({name!r})) == 64\n"
-            + ("    assert False, 'intentional CI worker failure'\n" if fail and i == 0 else "")
+            + (f"    assert False, {failure_message!r}\n" if fail and i == 0 else "")
             for i, name in enumerate(names)
         ),
         encoding="utf-8",
@@ -73,6 +74,7 @@ def test_ci_runner_runs_every_test_and_propagates_worker_failure(
     environment = {k: v for k, v in os.environ.items() if not k.startswith("COV_CORE_")}
     # Clear ancestor pytest workers' coverage startup hooks in this nested test.
     environment.pop("COVERAGE_PROCESS_START", None)
+    environment["PYTHONIOENCODING"] = encoding
     result = subprocess.run(
         [
             sys.executable,
@@ -93,16 +95,23 @@ def test_ci_runner_runs_every_test_and_propagates_worker_failure(
         cwd=ROOT,
         capture_output=True,
         text=True,
-        encoding="utf-8",
+        encoding=encoding,
         timeout=120,
     )
     assert result.returncode == int(fail), result.stdout + result.stderr
+    assert f"=== CI shard 0: exit {int(fail)} ===" in result.stdout
+    assert "=== CI shard 1: exit 0 ===" in result.stdout
     evidence = next((tmp_path / "evidence").glob("noyra-ci-*"))
     assert load_runner().verify_manifests(evidence, 2) == 4
     assert (evidence / ".coverage").is_file()
     assert "CI inventory verified: 4 tests assigned exactly once" in result.stdout
     if fail:
-        assert "intentional CI worker failure" in result.stdout
+        expected = (
+            failure_message if encoding == "utf-8" else r"intentional CI worker failure \ufffd"
+        )
+        assert expected in result.stdout
+        failed_log = evidence / "shard-0.log"
+        assert failure_message in failed_log.read_text(encoding="utf-8")
 
 
 def test_ci_job_keeps_matrix_and_runs_all_checks() -> None:

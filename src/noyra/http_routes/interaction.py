@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Literal, cast
 from noyra.core.errors import IntegrityError, InvalidTransitionError, NotFoundError
 from noyra.interaction import TransportInput
 from noyra.interaction.conversations import ConversationConflict
+from noyra.interaction.outreach import OutreachChange, OutreachDenied
 
 if TYPE_CHECKING:
     from noyra.service import NoyraHTTPServer
@@ -115,6 +116,15 @@ def change_transport_status(self: RequestHandler, owner: NoyraHTTPServer) -> Non
         return
     transport_id, operation = parts
     try:
+        if operation == "outreach":
+            result = owner.transports.change_outreach(
+                transport_id,
+                OutreachChange.model_validate(payload),
+                actor=self._actor(),
+                subject_id=owner.kernel.subject_id,
+            )
+            self._json(HTTPStatus.OK, result)
+            return
         if operation == "enable":
             record = owner.transports.enable(
                 transport_id,
@@ -138,6 +148,9 @@ def change_transport_status(self: RequestHandler, owner: NoyraHTTPServer) -> Non
             )
         else:
             raise ValueError("unsupported transport operation")
+    except OutreachDenied:
+        self._json(HTTPStatus.CONFLICT, {"error": "outreach_authorization_conflict"})
+        return
     except (ValueError, PermissionError):
         self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_transport"})
         return

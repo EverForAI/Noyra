@@ -4,6 +4,7 @@ from typing import Any
 
 from noyra.core.database import Database
 from noyra.core.errors import IntegrityError, NotFoundError
+from noyra.core.private_erasure_schema import ERASED_REFLECTION_HASH
 from noyra.core.types import content_hash, new_id, utc_now
 
 from .errors import InteractionStateConflictError
@@ -45,11 +46,13 @@ class PublicDiaryStore:
             if sleep["status"] != "complete":
                 raise InteractionStateConflictError("a diary can be published only after wake")
             reflection = connection.execute(
-                "SELECT public_diary_candidate FROM sleep_reflections WHERE sleep_id = ?",
+                "SELECT public_diary_candidate,plan_hash FROM sleep_reflections WHERE sleep_id = ?",
                 (source_sleep_id,),
             ).fetchone()
             if reflection is None:
                 raise InteractionStateConflictError("diary source has no reflection")
+            if reflection["plan_hash"] == ERASED_REFLECTION_HASH:
+                raise InteractionStateConflictError("diary source reflection was erased")
             candidate = reflection["public_diary_candidate"]
             if candidate is not None and candidate != body:
                 raise InteractionStateConflictError(

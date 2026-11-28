@@ -181,6 +181,11 @@ def replay_motivation_validation(receipt: dict[str, Any], proposal: dict[str, An
         {key: ValueProfileRecord(**value) for key, value in snapshot["values"].items()},
         {key: MissionCandidateRecord(**value) for key, value in snapshot["missions"].items()},
         snapshot["completed_sleep_count"],
+        memory_revisions={},
+        belief_revisions={},
+        memory_provenance=snapshot.get("memory_provenance", {}),
+        belief_provenance=snapshot.get("belief_provenance", {}),
+        event_provenance=snapshot.get("event_provenance", {}),
     )
     try:
         validator._validate(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 from pathlib import Path
@@ -7,14 +8,18 @@ from typing import Any
 
 import pytest
 
-from noyra.core import Database, IdentityStore
+from noyra.core import Database, EventStore, IdentityStore
 from noyra.core import database as database_module
 from noyra.core.at_rest import BackupKeyring, EncryptedBackupManager
 from noyra.core.errors import IntegrityError, NotFoundError
+from noyra.core.export_jobs import ExportCancelledError
+from noyra.core.private_erasure_schema import ERASED_REFLECTION_HASH, ERASED_REFLECTION_PLAN
 from noyra.core.private_sources import private_input_scope
+from noyra.core.runtime_export import RuntimeLogExporter
 from noyra.core.types import canonical_json, content_hash, new_id, utc_now
 from noyra.interaction import InteractionStore
 from noyra.interaction.conversations import ConversationConflict, ConversationStore, _row
+from noyra.interaction.diary import PublicDiaryStore
 from noyra.interaction.erasure import (
     ERASED,
     ERASED_MODEL,
@@ -25,13 +30,22 @@ from noyra.interaction.erasure import (
 from noyra.interaction.erasure import (
     ConversationErasure as RecoveryErasure,
 )
+from noyra.interaction.errors import InteractionStateConflictError
 from noyra.interaction.integrity import InteractionIntegrity
 from noyra.interaction.types import InteractionDecision
-from noyra.mind import MemoryStore, MindEngine
+from noyra.mind import (
+    EntityStore,
+    MemoryBlockStore,
+    MemoryConsolidator,
+    MemoryIntegrationSupervisor,
+    MemoryStore,
+    MindEngine,
+)
 from noyra.mind.errors import CausalValidationError
 from noyra.model.errors import ModelCallStateError
 from noyra.model.ledger import ModelLedger
 from noyra.model.types import BudgetLimits, ModelUsage
+from noyra.sleep import SleepEngine, SleepIntegrity, SleepMemory, SleepReflectionPlan
 
 
 class ConversationErasure(RecoveryErasure):
@@ -156,6 +170,2364 @@ def _private_message(db: Database) -> tuple[dict[str, Any], str, str]:
             (message.interaction_id,),
         ).fetchone()[0]
     return window, message.interaction_id, event
+
+
+@pytest.mark.parametrize("derivative", ["memory_block", "entity_graph"])
+def test_memory_derivative_domains_use_verified_erasure_boundaries(
+    tmp_path: Path, derivative: str
+) -> None:
+    db = Database(tmp_path / "noyra.sqlite3")
+    window, message_id, event_id = _private_message(db)
+
+    if derivative == "memory_block":
+        blocks = MemoryBlockStore(db)
+        block = blocks.create(
+            "owner",
+            "working_context",
+            "private conversation context",
+            "A summary that may contain conversation-derived details.",
+            reason="captured context",
+            source_memory_ids=(),
+            source_event_ids=(event_id,),
+        )
+        block_lineage = blocks.lineage_history(block.block_id)[0]
+        assert block_lineage.event_lineage_complete is True
+        assert tuple(event.event_id for event in block_lineage.event_sources) == (event_id,)
+
+        erasure = ConversationErasure(db)
+        assessment = erasure.assess("owner", window["conversation_id"])
+        assert assessment["status"] == "full_contract_pending"
+        assert assessment["deletion_available"] is False
+
+        erasure.request("owner", window["conversation_id"], expected_revision=1, confirmed=True)
+        result = erasure.run("owner", window["conversation_id"])
+        assert result["status"] == "completed"
+        assert result["counts"]["memory_block_revisions"] == 1
+        assert result["counts"]["memory_blocks"] == 1
+        assert blocks.get(block.block_id).content == ERASED
+        assert blocks.get(block.block_id).status == "archived"
+        assert blocks.verify_integrity("owner")["memory_block_revisions"] == 1
+        with db.connection() as connection:
+            assert (
+                connection.execute(
+                    "SELECT COUNT(*) FROM private_erasure_receipts "
+                    "WHERE record_table='memory_block_revisions'"
+                ).fetchone()[0]
+                == 1
+            )
+            assert (
+                connection.execute(
+                    "SELECT COUNT(*) FROM private_erasure_receipts "
+                    "WHERE record_table='memory_blocks'"
+                ).fetchone()[0]
+                == 1
+            )
+        assert InteractionStore(db).get(message_id).content == ERASED
+        return
+
+    entities = EntityStore(db)
+    entity = entities.upsert(
+        "owner",
+        "person",
+        "private-person",
+        "Private conversation person",
+        creation_event_ids=(event_id,),
+    )
+    link = entities.link_evidence(
+        "owner",
+        entity.entity_id,
+        "event",
+        event_id,
+        role="mentioned in private conversation",
+        confidence=0.9,
+    )
+
+    erasure = ConversationErasure(db)
+    assessment = erasure.assess("owner", window["conversation_id"])
+    assert assessment["status"] == "full_contract_pending"
+    assert assessment["deletion_available"] is False
+
+    erasure.request("owner", window["conversation_id"], expected_revision=1, confirmed=True)
+    result = erasure.run("owner", window["conversation_id"])
+    assert result["status"] == "completed"
+    assert result["counts"]["entity_records"] == 1
+    assert result["counts"]["entity_evidence_links"] == 1
+    erased_key = f"[erased]:{content_hash(entity.entity_id)}"
+    erased_entity = entities.find("owner", ERASED, erased_key)
+    assert erased_entity.display_name == ERASED
+    assert erased_entity.first_seen_at == ERASED and erased_entity.last_seen_at == ERASED
+    erased_links = entities.evidence_links("owner", erased_entity.entity_id)
+    assert len(erased_links) == 1
+    assert erased_links[0].source_id == f"[erased]:{content_hash(link.link_id)}"
+    assert erased_links[0].role == ERASED
+    assert entities.verify_integrity("owner") == {"entities": 1, "relations": 0, "links": 1}
+    with db.connection() as connection:
+        with pytest.raises(
+            sqlite3.IntegrityError, match="erased entity content cannot be restored"
+        ):
+            connection.execute(
+                "UPDATE entities SET canonical_key='restored' WHERE entity_id=?",
+                (entity.entity_id,),
+            )
+        with pytest.raises(
+            sqlite3.IntegrityError, match="entity evidence links require explicit content erasure"
+        ):
+            connection.execute(
+                "UPDATE entity_evidence_links SET source_id='restored' WHERE link_id=?",
+                (link.link_id,),
+            )
+        with pytest.raises(
+            sqlite3.IntegrityError, match="erased entity content cannot be restored"
+        ):
+            connection.execute(
+                "UPDATE entities SET first_seen_at='2026-01-01' WHERE entity_id=?",
+                (entity.entity_id,),
+            )
+        with pytest.raises(
+            sqlite3.IntegrityError, match="erased entity content cannot be restored"
+        ):
+            connection.execute(
+                "UPDATE entities SET state_hash=? WHERE entity_id=?",
+                ("f" * 64, entity.entity_id),
+            )
+        with pytest.raises(
+            sqlite3.IntegrityError, match="entity evidence links require explicit content erasure"
+        ):
+            connection.execute(
+                "UPDATE entity_evidence_links SET created_at='2026-01-01' WHERE link_id=?",
+                (link.link_id,),
+            )
+        payload = {
+            "entity_id": entity.entity_id,
+            "source_type": "event",
+            "source_id": "new-private-event",
+            "role": "restoration attempt",
+            "confidence": 0.5,
+        }
+        with pytest.raises(sqlite3.IntegrityError, match="erased entity cannot receive evidence"):
+            connection.execute(
+                "INSERT INTO entity_evidence_links(link_id,subject_id,entity_id,source_type,"
+                "source_id,role,confidence,state_hash,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                (
+                    new_id("entity-link"),
+                    "owner",
+                    entity.entity_id,
+                    "event",
+                    payload["source_id"],
+                    payload["role"],
+                    payload["confidence"],
+                    content_hash(payload),
+                    "2026-01-01",
+                ),
+            )
+    assert InteractionStore(db).get(message_id).content == ERASED
+
+
+def test_entity_relation_with_direct_event_sources_is_redacted(tmp_path: Path) -> None:
+    db = Database(tmp_path / "noyra.sqlite3")
+    window, message_id, private_event_id = _private_message(db)
+    entities = EntityStore(db)
+    source = entities.upsert(
+        "owner",
+        "person",
+        "private-source",
+        "Private source",
+        creation_event_ids=(private_event_id,),
+    )
+    target = entities.upsert(
+        "owner",
+        "person",
+        "private-target",
+        "Private target",
+        creation_event_ids=(private_event_id,),
+    )
+    relation = entities.relation(
+        "owner",
+        source.entity_id,
+        "mentioned-with",
+        target.entity_id,
+        source_event_ids=(private_event_id,),
+        confidence=0.8,
+    )
+
+    erasure = ConversationErasure(db)
+    erasure.request("owner", window["conversation_id"], expected_revision=1, confirmed=True)
+    result = erasure.run("owner", window["conversation_id"])
+    assert result["status"] == "completed"
+    assert result["counts"]["entity_relations"] == 1
+    redacted = entities.relations("owner")[0]
+    assert redacted.relation_id == relation.relation_id
+    assert redacted.relation_type == ERASED
+    assert redacted.source_event_ids == (ERASED,)
+    assert redacted.status == "contradicted"
+    with db.connection() as connection:
+        entity_rows = {
+            row["entity_id"]: row
+            for row in connection.execute(
+                "SELECT * FROM entities WHERE subject_id='owner'"
+            ).fetchall()
+        }
+    assert set(entity_rows) == {source.entity_id, target.entity_id}
+    for entity_id, row in entity_rows.items():
+        assert row["entity_type"] == ERASED
+        assert row["canonical_key"] == f"[erased]:{content_hash(entity_id)}"
+        assert row["display_name"] == ERASED
+        assert row["first_seen_at"] == ERASED and row["last_seen_at"] == ERASED
+    with db.connection() as connection:
+        persisted_relation = connection.execute(
+            "SELECT observed_at FROM entity_relations WHERE relation_id=?",
+            (relation.relation_id,),
+        ).fetchone()
+        assert persisted_relation["observed_at"] == f"[erased]:{content_hash(relation.relation_id)}"
+    assert entities.verify_integrity("owner") == {"entities": 2, "relations": 1, "links": 0}
+    with (
+        db.connection() as connection,
+        pytest.raises(
+            sqlite3.IntegrityError, match="entity relations require explicit content erasure"
+        ),
+    ):
+        connection.execute(
+            "UPDATE entity_relations SET relation_type='restored' WHERE relation_id=?",
+            (relation.relation_id,),
+        )
+    with (
+        db.connection() as connection,
+        pytest.raises(
+            sqlite3.IntegrityError, match="entity relations require explicit content erasure"
+        ),
+    ):
+        connection.execute(
+            "UPDATE entity_relations SET observed_at='2026-01-01' WHERE relation_id=?",
+            (relation.relation_id,),
+        )
+    with (
+        db.connection() as connection,
+        pytest.raises(sqlite3.IntegrityError, match="erased entity cannot receive relations"),
+    ):
+        connection.execute(
+            "INSERT INTO entity_relations(relation_id,subject_id,source_entity_id,relation_type,"
+            "target_entity_id,valid_from,valid_until,observed_at,confidence,status,"
+            "source_event_ids_json,state_hash) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                new_id("relgraph"),
+                "owner",
+                source.entity_id,
+                "restored relation",
+                target.entity_id,
+                None,
+                None,
+                "2026-01-01T00:00:00+00:00",
+                0.5,
+                "active",
+                canonical_json([private_event_id]),
+                "0" * 64,
+            ),
+        )
+    assert InteractionStore(db).get(message_id).content == ERASED
+
+
+def test_backup_restore_replays_entity_graph_erasure(tmp_path: Path) -> None:
+    current = tmp_path / "current"
+    db = Database(current / "noyra.sqlite3")
+    window, _, private_event_id = _private_message(db)
+    entities = EntityStore(db)
+    entity = entities.upsert(
+        "owner", "person", "backup-person", "Backup person", creation_event_ids=(private_event_id,)
+    )
+    entities.link_evidence(
+        "owner",
+        entity.entity_id,
+        "event",
+        private_event_id,
+        role="private mention",
+        confidence=0.9,
+    )
+    keyring = tmp_path / "keyring.json"
+    BackupKeyring.initialize(keyring)
+    manager = EncryptedBackupManager(current, keyring)
+    backup = tmp_path / "before-erasure.noyra-backup"
+    manager.create(backup)
+
+    erasure = ConversationErasure(db)
+    erasure.request("owner", window["conversation_id"], expected_revision=1, confirmed=True)
+    assert erasure.run("owner", window["conversation_id"])["status"] == "completed"
+
+    target = tmp_path / "restored"
+    manager.restore(backup, target)
+    restored = Database(target / "noyra.sqlite3")
+    restored_entities = EntityStore(restored)
+    erased_key = f"[erased]:{content_hash(entity.entity_id)}"
+    restored_entity = restored_entities.find("owner", ERASED, erased_key)
+    assert restored_entity.display_name == ERASED
+    restored_link = restored_entities.evidence_links("owner", restored_entity.entity_id)[0]
+    assert restored_link.source_id == f"[erased]:{content_hash(restored_link.link_id)}"
+    assert restored_link.created_at == ERASED
+
+
+def test_erasing_multiple_event_links_preserves_unique_evidence_rows(tmp_path: Path) -> None:
+    db = Database(tmp_path / "noyra.sqlite3")
+    window, _, first_event = _private_message(db)
+    second_message = InteractionStore(db).receive(
+        "owner",
+        "web",
+        "web-user",
+        "another private utterance",
+        conversation_id=window["conversation_id"],
+    )
+    with db.connection() as connection:
+        second_event = connection.execute(
+            "SELECT event_id FROM events WHERE event_type='interaction_received' "
+            "AND json_extract(payload_json,'$.interaction_id')=?",
+            (second_message.interaction_id,),
+        ).fetchone()[0]
+    entities = EntityStore(db)
+    entity = entities.upsert(
+        "owner", "person", "multi-link", "Multi-link person", creation_event_ids=(first_event,)
+    )
+    first_link = entities.link_evidence(
+        "owner", entity.entity_id, "event", first_event, role="first mention", confidence=0.8
+    )
+    second_link = entities.link_evidence(
+        "owner", entity.entity_id, "event", second_event, role="second mention", confidence=0.8
+    )
+
+    erasure = ConversationErasure(db)
+    erasure.request("owner", window["conversation_id"], expected_revision=1, confirmed=True)
+    result = erasure.run("owner", window["conversation_id"])
+    assert result["status"] == "completed"
+    erased_entity = entities.find("owner", ERASED, f"[erased]:{content_hash(entity.entity_id)}")
+    redacted_links = entities.evidence_links("owner", erased_entity.entity_id)
+    assert len(redacted_links) == 2
+    assert {link.source_id for link in redacted_links} == {
+        f"[erased]:{content_hash(first_link.link_id)}",
+        f"[erased]:{content_hash(second_link.link_id)}",
+    }
+    assert {link.role for link in redacted_links} == {ERASED}
+
+
+def test_unlineaged_entity_blocks_private_erasure(tmp_path: Path) -> None:
+    db = Database(tmp_path / "noyra.sqlite3")
+    window, message_id, event_id = _private_message(db)
+    entities = EntityStore(db)
+    entity = entities.upsert("owner", "person", "opaque", "Unproven entity")
+    entities.link_evidence(
+        "owner", entity.entity_id, "event", event_id, role="private mention", confidence=0.8
+    )
+
+    with pytest.raises(ErasureReviewRequired, match="private_memory_derivative_review_required"):
+        ConversationErasure(db).request(
+            "owner", window["conversation_id"], expected_revision=1, confirmed=True
+        )
+
+    assert entities.find("owner", "person", "opaque").entity_id == entity.entity_id
+    assert InteractionStore(db).get(message_id).content == "private original"
+
+
+def test_entity_update_invalidates_creation_evidence(tmp_path: Path) -> None:
+    db = Database(tmp_path / "noyra.sqlite3")
+    window, message_id, event_id = _private_message(db)
+    entities = EntityStore(db)
+    entities.upsert("owner", "person", "revised", "Original entity", creation_event_ids=(event_id,))
+    revised = entities.upsert("owner", "person", "revised", "Revised entity")
+    with db.read_transaction() as connection:
+        assert (
+            connection.execute(
+                "SELECT creation_evidence_json FROM entities WHERE entity_id=?",
+                (revised.entity_id,),
+            ).fetchone()[0]
+            is None
+        )
+    erasure = RecoveryErasure(db)
+    assert erasure.assess("owner", window["conversation_id"])["reason_code"] == (
+        "private_memory_derivative_review_required"
+    )
+    assert InteractionStore(db).get(message_id).content == "private original"
+
+
+def test_erasure_preserves_entity_with_independent_creation_evidence(tmp_path: Path) -> None:
+    db = Database(tmp_path / "noyra.sqlite3")
+    window, _, private_event = _private_message(db)
+    independent_event = EventStore(db).append("owner", "experience", "test", {}).event_id
+    entities = EntityStore(db)
+    private = entities.upsert(
+        "owner", "person", "private", "Private entity", creation_event_ids=(private_event,)
+    )
+    independent = entities.upsert(
+        "owner",
+        "person",
+        "independent",
+        "Independent entity",
+        creation_event_ids=(independent_event,),
+    )
+    erasure = ConversationErasure(db)
+    erasure.request("owner", window["conversation_id"], expected_revision=1, confirmed=True)
+    result = erasure.run("owner", window["conversation_id"])
+    assert result["status"] == "completed"
+    assert result["counts"]["entity_records"] == 1
+    assert entities.find("owner", "person", "independent") == independent
+    with db.read_transaction() as connection:
+        assert (
+            connection.execute(
+                "SELECT creation_evidence_json FROM entities WHERE entity_id=?",
+                (private.entity_id,),
+            ).fetchone()[0]
+            is None
+        )
+
+
+def test_entity_event_evidence_requires_a_verified_event_chain_root(tmp_path: Path) -> None:
+    db = Database(tmp_path / "noyra.sqlite3")
+    window, _, private_event_id = _private_message(db)
+    entities = EntityStore(db)
+    entity = entities.upsert(
+        "owner", "person", "chain-person", "Chain person", creation_event_ids=(private_event_id,)
+    )
+    entities.link_evidence(
+        "owner",
+        entity.entity_id,
+        "event",
+        private_event_id,
+        role="private mention",
+        confidence=0.8,
+    )
+    with db.transaction() as connection:
+        connection.execute("DROP TRIGGER prevent_event_chain_update")
+        connection.execute(
+            "UPDATE event_chain_roots SET root_hash=? WHERE event_id=?",
+            ("f" * 64, private_event_id),
+        )
+
+    with pytest.raises(IntegrityError, match="entity event evidence chain mismatch"):
+        ConversationErasure(db).request(
+            "owner", window["conversation_id"], expected_revision=1, confirmed=True
+        )
+
+
+def test_later_private_erasure_skips_verified_entity_tombstones(tmp_path: Path) -> None:
+    db = Database(tmp_path / "noyra.sqlite3")
+    first, first_message, first_event = _private_message(db)
+    second = ConversationStore(db).create("owner", "second private title")
+    second_message = InteractionStore(db).receive(
+        "owner",
+        "web",
+        "web-user",
+        "second private original",
+        conversation_id=second["conversation_id"],
+    )
+    entities = EntityStore(db)
+    entity = entities.upsert(
+        "owner",
+        "person",
+        "first-private",
+        "First private entity",
+        creation_event_ids=(first_event,),
+    )
+    entities.link_evidence(
+        "owner",
+        entity.entity_id,
+        "event",
+        first_event,
+        role="first conversation mention",
+        confidence=0.9,
+    )
+    erasure = ConversationErasure(db)
+    erasure.request("owner", first["conversation_id"], expected_revision=1, confirmed=True)
+    assert erasure.run("owner", first["conversation_id"])["status"] == "completed"
+
+    erasure.request("owner", second["conversation_id"], expected_revision=1, confirmed=True)
+    assert erasure.run("owner", second["conversation_id"])["status"] == "completed"
+    assert InteractionStore(db).get(first_message).content == ERASED
+    assert InteractionStore(db).get(second_message.interaction_id).content == ERASED
+    assert (
+        entities.find("owner", ERASED, f"[erased]:{content_hash(entity.entity_id)}").display_name
+        == ERASED
+    )
+
+
+def test_erasing_same_type_entities_uses_distinct_redacted_keys(tmp_path: Path) -> None:
+    db = Database(tmp_path / "noyra.sqlite3")
+    window, _, private_event_id = _private_message(db)
+    entities = EntityStore(db)
+    records = [
+        entities.upsert(
+            "owner",
+            "person",
+            f"private-{index}",
+            f"Private {index}",
+            creation_event_ids=(private_event_id,),
+        )
+        for index in range(2)
+    ]
+    for entity in records:
+        entities.link_evidence(
+            "owner",
+            entity.entity_id,
+            "event",
+            private_event_id,
+            role="private mention",
+            confidence=0.8,
+        )
+
+    erasure = ConversationErasure(db)
+    erasure.request("owner", window["conversation_id"], expected_revision=1, confirmed=True)
+    result = erasure.run("owner", window["conversation_id"])
+    assert result["status"] == "completed"
+    assert result["counts"]["entity_records"] == 2
+    with db.connection() as connection:
+        rows = connection.execute(
+            "SELECT entity_id,entity_type,canonical_key,display_name,first_seen_at,last_seen_at "
+            "FROM entities WHERE subject_id='owner' ORDER BY entity_id"
+        ).fetchall()
+    assert len({row["canonical_key"] for row in rows}) == 2
+    for row in rows:
+        assert row["entity_type"] == ERASED
+        assert row["canonical_key"] == f"[erased]:{content_hash(row['entity_id'])}"
+        assert row["display_name"] == ERASED
+        assert row["first_seen_at"] == ERASED and row["last_seen_at"] == ERASED
+
+
+def test_entity_graph_with_mixed_evidence_remains_fail_closed(tmp_path: Path) -> None:
+    db = Database(tmp_path / "noyra.sqlite3")
+    window, _, private_event_id = _private_message(db)
+    independent_event_id = EventStore(db).append("owner", "experience", "test", {}).event_id
+    entities = EntityStore(db)
+    entity = entities.upsert(
+        "owner", "person", "mixed-person", "Mixed person", creation_event_ids=(private_event_id,)
+    )
+    entities.link_evidence(
+        "owner",
+        entity.entity_id,
+        "event",
+        private_event_id,
+        role="private mention",
+        confidence=0.9,
+    )
+    entities.link_evidence(
+        "owner",
+        entity.entity_id,
+        "event",
+        independent_event_id,
+        role="independent mention",
+        confidence=0.9,
+    )
+
+    with pytest.raises(ErasureReviewRequired, match="private_memory_derivative_review_required"):
+        ConversationErasure(db).request(
+            "owner", window["conversation_id"], expected_revision=1, confirmed=True
+        )
+
+
+def test_entity_memory_evidence_to_affected_memory_remains_fail_closed(tmp_path: Path) -> None:
+    db = Database(tmp_path / "noyra.sqlite3")
+    window, _, private_event_id = _private_message(db)
+    memory = MemoryStore(db).create(
+        "owner",
+        "semantic",
+        "Private entity evidence source.",
+        salience=0.8,
+        confidence=0.9,
+        source_event_ids=(private_event_id,),
+    )
+    entities = EntityStore(db)
+    entity = entities.upsert(
+        "owner", "person", "memory-source", "Private person", creation_event_ids=(private_event_id,)
+    )
+    entities.link_evidence(
+        "owner",
+        entity.entity_id,
+        "memory",
+        memory.memory_id,
+        role="private memory mention",
+        confidence=0.8,
+    )
+
+    with pytest.raises(ErasureReviewRequired, match="private_memory_derivative_review_required"):
+        ConversationErasure(db).request(
+            "owner", window["conversation_id"], expected_revision=1, confirmed=True
+        )
+
+
+def test_entity_memory_integration_evidence_to_affected_integration_remains_fail_closed(
+    tmp_path: Path,
+) -> None:
+    db = Database(tmp_path / "noyra.sqlite3")
+    window, _, private_event_id = _private_message(db)
+    memories = MemoryStore(db)
+    sources = tuple(
+        memories.create(
+            "owner",
+            "semantic",
+            f"Private integration source {index}.",
+            salience=0.8,
+            confidence=0.9,
+            source_event_ids=(private_event_id,),
+        )
+        for index in range(2)
+    )
+    integration = MemoryIntegrationSupervisor(db, "owner").integrate(
+        "contradict",
+        tuple(memory.memory_id for memory in sources),
+        synthesis="Private integrated evidence.",
+        confidence=0.8,
+        evidence_event_ids=(private_event_id,),
+        reason="private evidence integration",
+    )
+    entities = EntityStore(db)
+    entity = entities.upsert(
+        "owner",
+        "person",
+        "integration-source",
+        "Private person",
+        creation_event_ids=(private_event_id,),
+    )
+    entities.link_evidence(
+        "owner",
+        entity.entity_id,
+        "memory_integration",
+        integration.integration_id,
+        role="private integration mention",
+        confidence=0.8,
+    )
+
+    with pytest.raises(ErasureReviewRequired, match="private_memory_derivative_review_required"):
+        ConversationErasure(db).request(
+            "owner", window["conversation_id"], expected_revision=1, confirmed=True
+        )
+
+
+def test_entity_relation_with_mixed_event_sources_remains_fail_closed(tmp_path: Path) -> None:
+    db = Database(tmp_path / "noyra.sqlite3")
+    window, _, private_event_id = _private_message(db)
+    independent_event_id = EventStore(db).append("owner", "experience", "test", {}).event_id
+    entities = EntityStore(db)
+    source = entities.upsert(
+        "owner", "person", "mixed-source", "Mixed source", creation_event_ids=(private_event_id,)
+    )
+    target = entities.upsert(
+        "owner", "person", "mixed-target", "Mixed target", creation_event_ids=(private_event_id,)
+    )
+    entities.relation(
+        "owner",
+        source.entity_id,
+        "mixed-relation",
+        target.entity_id,
+        source_event_ids=(private_event_id, independent_event_id),
+        confidence=0.8,
+    )
+
+    with pytest.raises(ErasureReviewRequired, match="private_memory_derivative_review_required"):
+        ConversationErasure(db).request(
+            "owner", window["conversation_id"], expected_revision=1, confirmed=True
+        )
+
+
+def test_memory_block_with_mixed_event_sources_remains_fail_closed(tmp_path: Path) -> None:
+    db = Database(tmp_path / "noyra.sqlite3")
+    window, _, private_event_id = _private_message(db)
+    independent_event_id = EventStore(db).append("owner", "experience", "test", {}).event_id
+    MemoryBlockStore(db).create(
+        "owner",
+        "working_context",
+        "mixed context",
+        "Mixed private and independent evidence.",
+        reason="mixed capture",
+        source_memory_ids=(),
+        source_event_ids=(private_event_id, independent_event_id),
+    )
+
+    erasure = ConversationErasure(db)
+    with pytest.raises(ErasureReviewRequired, match="private_memory_derivative_review_required"):
+        erasure.request("owner", window["conversation_id"], expected_revision=1, confirmed=True)
+
+
+def test_memory_block_with_affected_memory_source_remains_fail_closed(tmp_path: Path) -> None:
+    db = Database(tmp_path / "noyra.sqlite3")
+    window, _, private_event_id = _private_message(db)
+    memory = MemoryStore(db).create(
+        "owner",
+        "semantic",
+        "Private memory source.",
+        salience=0.8,
+        confidence=0.9,
+        source_event_ids=(private_event_id,),
+    )
+    MemoryBlockStore(db).create(
+        "owner",
+        "working_context",
+        "memory-derived context",
+        "Derived from a private memory.",
+        reason="derived capture",
+        source_memory_ids=(memory.memory_id,),
+        source_event_ids=(),
+    )
+
+    erasure = ConversationErasure(db)
+    with pytest.raises(ErasureReviewRequired, match="private_memory_derivative_review_required"):
+        erasure.request("owner", window["conversation_id"], expected_revision=1, confirmed=True)
+
+
+def test_legacy_memory_block_without_event_coverage_remains_fail_closed(tmp_path: Path) -> None:
+    db = Database(tmp_path / "noyra.sqlite3")
+    window, _, private_event_id = _private_message(db)
+    blocks = MemoryBlockStore(db)
+    block = blocks.create(
+        "owner",
+        "working_context",
+        "legacy context",
+        "Legacy context without direct event coverage.",
+        reason="legacy capture",
+        source_memory_ids=(),
+        source_event_ids=(private_event_id,),
+    )
+    with db.transaction() as connection:
+        connection.execute("DROP TRIGGER prevent_memory_block_revision_event_source_delete")
+        connection.execute("DROP TRIGGER prevent_memory_block_revision_event_coverage_delete")
+        connection.execute("DROP TRIGGER prevent_memory_block_revision_lineage_update")
+        connection.execute(
+            "DELETE FROM memory_block_revision_event_sources WHERE revision_id IN "
+            "(SELECT revision_id FROM memory_block_revisions WHERE block_id=?)",
+            (block.block_id,),
+        )
+        connection.execute(
+            "DELETE FROM memory_block_revision_event_coverage WHERE revision_id IN "
+            "(SELECT revision_id FROM memory_block_revisions WHERE block_id=?)",
+            (block.block_id,),
+        )
+        connection.execute(
+            "UPDATE memory_block_revision_lineage SET lineage_hash=? WHERE revision_id IN "
+            "(SELECT revision_id FROM memory_block_revisions WHERE block_id=?)",
+            (MemoryBlockStore._lineage_hash("declared_no_memory_sources", ()), block.block_id),
+        )
+
+    erasure = ConversationErasure(db)
+    with pytest.raises(ErasureReviewRequired, match="private_memory_derivative_review_required"):
+        erasure.request("owner", window["conversation_id"], expected_revision=1, confirmed=True)
+
+
+def test_unrelated_memory_block_survives_private_event_erasure(tmp_path: Path) -> None:
+    db = Database(tmp_path / "noyra.sqlite3")
+    window, _, private_event_id = _private_message(db)
+    independent_event_id = EventStore(db).append("owner", "experience", "test", {}).event_id
+    blocks = MemoryBlockStore(db)
+    block = blocks.create(
+        "owner",
+        "working_context",
+        "independent context",
+        "Independent context remains readable.",
+        reason="independent capture",
+        source_memory_ids=(),
+        source_event_ids=(independent_event_id,),
+    )
+
+    erasure = ConversationErasure(db)
+    erasure.request("owner", window["conversation_id"], expected_revision=1, confirmed=True)
+    assert erasure.run("owner", window["conversation_id"])["status"] == "completed"
+    assert blocks.get(block.block_id).content == "Independent context remains readable."
+    with db.connection() as connection:
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM private_erasure_receipts "
+                "WHERE record_table IN ('memory_blocks','memory_block_revisions')"
+            ).fetchone()[0]
+            == 0
+        )
+    assert private_event_id
+
+
+def test_historical_memory_block_revision_is_redacted_without_erasing_current_revision(
+    tmp_path: Path,
+) -> None:
+    db = Database(tmp_path / "noyra.sqlite3")
+    window, _, private_event_id = _private_message(db)
+    independent_event_id = EventStore(db).append("owner", "experience", "test", {}).event_id
+    blocks = MemoryBlockStore(db)
+    block = blocks.create(
+        "owner",
+        "working_context",
+        "versioned context",
+        "Private historical context.",
+        reason="private capture",
+        source_memory_ids=(),
+        source_event_ids=(private_event_id,),
+    )
+    blocks.revise(
+        block.block_id,
+        "Independent current context.",
+        reason="independent refresh",
+        expected_version=1,
+        source_memory_ids=(),
+        source_event_ids=(independent_event_id,),
+    )
+
+    erasure = ConversationErasure(db)
+    erasure.request("owner", window["conversation_id"], expected_revision=1, confirmed=True)
+    result = erasure.run("owner", window["conversation_id"])
+    assert result["status"] == "completed"
+    assert result["counts"]["memory_block_revisions"] == 1
+    assert result["counts"]["memory_blocks"] == 0
+    assert blocks.get(block.block_id).content == "Independent current context."
+    with db.connection() as connection:
+        rows = connection.execute(
+            "SELECT version,content,reason FROM memory_block_revisions "
+            "WHERE block_id=? ORDER BY version",
+            (block.block_id,),
+        ).fetchall()
+    assert [(row["version"], row["content"], row["reason"]) for row in rows] == [
+        (1, ERASED, "privacy erasure"),
+        (2, "Independent current context.", "independent refresh"),
+    ]
+
+
+def test_backup_restore_replays_direct_event_memory_block_erasure(tmp_path: Path) -> None:
+    current = tmp_path / "current"
+    db = Database(current / "noyra.sqlite3")
+    window, _, private_event_id = _private_message(db)
+    block = MemoryBlockStore(db).create(
+        "owner",
+        "working_context",
+        "backup context",
+        "Backup must not restore erased block content.",
+        reason="private capture",
+        source_memory_ids=(),
+        source_event_ids=(private_event_id,),
+    )
+    keyring = tmp_path / "keyring.json"
+    BackupKeyring.initialize(keyring)
+    manager = EncryptedBackupManager(current, keyring)
+    backup = tmp_path / "before-erasure.noyra-backup"
+    manager.create(backup)
+
+    erasure = ConversationErasure(db)
+    erasure.request("owner", window["conversation_id"], expected_revision=1, confirmed=True)
+    assert erasure.run("owner", window["conversation_id"])["status"] == "completed"
+
+    target = tmp_path / "restored"
+    manager.restore(backup, target)
+    restored = Database(target / "noyra.sqlite3")
+    assert MemoryBlockStore(restored).get(block.block_id).content == ERASED
+    assert MemoryBlockStore(restored).get(block.block_id).status == "archived"
+
+
+def test_erased_memory_block_cannot_be_restored_by_direct_sql(tmp_path: Path) -> None:
+    db = Database(tmp_path / "noyra.sqlite3")
+    window, _, private_event_id = _private_message(db)
+    blocks = MemoryBlockStore(db)
+    block = blocks.create(
+        "owner",
+        "working_context",
+        "restoration guard",
+        "Private block content.",
+        reason="private capture",
+        source_memory_ids=(),
+        source_event_ids=(private_event_id,),
+    )
+    erasure = ConversationErasure(db)
+    erasure.request("owner", window["conversation_id"], expected_revision=1, confirmed=True)
+    assert erasure.run("owner", window["conversation_id"])["status"] == "completed"
+    with db.connection() as connection:
+        revision_id = connection.execute(
+            "SELECT revision_id FROM memory_block_revisions WHERE block_id=?",
+            (block.block_id,),
+        ).fetchone()[0]
+        with pytest.raises(
+            sqlite3.IntegrityError, match="memory block revisions require explicit content erasure"
+        ):
+            connection.execute(
+                "UPDATE memory_block_revisions SET content=?,content_hash=? WHERE revision_id=?",
+                ("restored", content_hash("restored"), revision_id),
+            )
+        with pytest.raises(
+            sqlite3.IntegrityError, match="erased memory block content cannot be restored"
+        ):
+            connection.execute(
+                "UPDATE memory_blocks SET content=?,content_hash=?,status='active' "
+                "WHERE block_id=?",
+                ("restored", content_hash("restored"), block.block_id),
+            )
+
+
+def _sleep_reflection(
+    db: Database,
+    inputs: tuple[str, ...],
+    text: str,
+    *,
+    bound: bool = True,
+    complete: bool = True,
+    match_response: bool = True,
+    memories: tuple[SleepMemory, ...] = (),
+) -> tuple[str, str]:
+    engine = SleepEngine(db, "owner")
+    engine.lifecycle.ensure_initial("active")
+    sleep_id = engine.start("subject_choice", "fixture sleep").sleep_id
+    engine.begin_reflection(sleep_id)
+    plan = SleepReflectionPlan(
+        summary=f"{text} summary",
+        facts=(f"{text} fact",),
+        contradictions=(f"{text} contradiction",),
+        prediction_errors=(f"{text} prediction error",),
+        unresolved_questions=(f"{text} question",),
+        public_diary_candidate=f"{text} diary candidate",
+        memories=memories,
+    )
+    ledger = ModelLedger(db)
+    with private_input_scope(inputs):
+        call, _ = ledger.prepare_call(
+            "owner",
+            "mock",
+            "mock",
+            f"sleep_reflection:{sleep_id}",
+            content_hash(text),
+            sleep_id,
+            request={"content": text},
+        )
+    attempt = ledger.authorize_attempt(
+        call.call_id,
+        BudgetLimits(100, 1000, 1000, 1000),
+        reserved_input_tokens=10,
+        reserved_output_tokens=10,
+        reserved_cost_microusd=10,
+    )
+    ledger.start_attempt(attempt.attempt_id)
+    ledger.finish_attempt(attempt.attempt_id, "succeeded", usage=ModelUsage(5, 5), cost_microusd=5)
+    response_plan = plan if match_response else SleepReflectionPlan(summary="another response")
+    ledger.finish_call(
+        call.call_id, "succeeded", response={"content": response_plan.model_dump_json()}
+    )
+    if bound:
+        plan._model_call_id = call.call_id
+    engine.commit_reflection(sleep_id, plan)
+    if complete:
+        engine.enter_deep_sleep(sleep_id)
+        engine.wake(sleep_id, "fixture wake", force=True)
+        engine.complete_wake(sleep_id)
+    return sleep_id, call.call_id
+
+
+def _reflection_row(db: Database, sleep_id: str) -> dict[str, Any]:
+    with db.read_transaction() as connection:
+        return dict(
+            connection.execute(
+                "SELECT * FROM sleep_reflections WHERE sleep_id=?", (sleep_id,)
+            ).fetchone()
+        )
+
+
+def test_sleep_reflection_erasure_replays_encrypted_backups_across_schema120(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "current"
+    secret = "fixture-reflection-cleartext-487230"
+    with monkeypatch.context() as historical:
+        historical.setattr(database_module, "CURRENT_SCHEMA_VERSION", 119)
+        db = Database(root / "noyra.sqlite3")
+        window, message, _ = _private_message(db)
+        other_window = ConversationStore(db).create("owner", "independent window")
+        other_message = InteractionStore(db).receive(
+            "owner",
+            "web",
+            "other-web-user",
+            "independent message",
+            conversation_id=other_window["conversation_id"],
+        )
+        sleep_id, call_id = _sleep_reflection(db, (message,), secret)
+        other_sleep, other_call = _sleep_reflection(
+            db, (other_message.interaction_id,), "independent reflection"
+        )
+    original = _reflection_row(db, sleep_id)
+    independent = _reflection_row(db, other_sleep)
+    original_other_call = ModelLedger(db).get_call(other_call)
+    run = SleepEngine(db, "owner").get(sleep_id)
+    chain = EventStore(db).verify_chain("owner")
+    integrity = SleepIntegrity(db).verify("owner")
+    keyring = tmp_path / "keyring.json"
+    BackupKeyring.initialize(keyring)
+    manager = EncryptedBackupManager(root, keyring)
+    before = tmp_path / "before-erasure.noyra-backup"
+    manager.create(before)
+    assert secret.encode() in db.path.read_bytes()
+
+    db = Database(db.path, strict_schema_contract=True)
+    assert _reflection_row(db, sleep_id) == original
+    assert not list(root.glob("noyra.sqlite3.pre-migration-v*.bak"))
+    erasure = ConversationErasure(db)
+    with pytest.raises(ErasureReviewRequired, match="private_deletion_disabled"):
+        RecoveryErasure(db).request(
+            "owner", window["conversation_id"], expected_revision=1, confirmed=True
+        )
+    erasure.request("owner", window["conversation_id"], expected_revision=1, confirmed=True)
+    result = erasure.run("owner", window["conversation_id"])
+    assert result["status"] == "completed", result
+    assert result["counts"]["sleep_reflections"] == 1
+    assert erasure.run("owner", window["conversation_id"]) == result
+    after = tmp_path / "after-erasure.noyra-backup"
+    manager.create(after)
+
+    restored = []
+    for index, backup in enumerate((before, after)):
+        destination = tmp_path / f"restored-{index}"
+        manager.restore(backup, destination)
+        copy = Database(
+            destination / "noyra.sqlite3", initialize=False, strict_schema_contract=True
+        )
+        restored.append(copy)
+        assert secret.encode() not in copy.path.read_bytes()
+        assert not any(
+            secret.encode() in path.read_bytes() for path in destination.glob("*.sqlite3-*")
+        )
+    for copy in [db, *restored]:
+        assert _reflection_row(copy, sleep_id) == {
+            **original,
+            "summary": ERASED,
+            "facts_json": "[]",
+            "contradictions_json": "[]",
+            "prediction_errors_json": "[]",
+            "unresolved_questions_json": "[]",
+            "public_diary_candidate": None,
+            "plan_json": ERASED_REFLECTION_PLAN,
+            "plan_hash": ERASED_REFLECTION_HASH,
+        }
+        assert _reflection_row(copy, other_sleep) == independent
+        assert ModelLedger(copy).get_call(other_call) == original_other_call
+        assert InteractionStore(copy).get(other_message.interaction_id) == other_message
+        assert InteractionStore(copy).get(message).content == ERASED
+        assert ModelLedger(copy).get_call(call_id).response == ERASED_MODEL
+        assert ModelLedger(copy).attempts(call_id)[0].cost_microusd == 5
+        assert SleepEngine(copy, "owner").get(sleep_id) == run
+        assert SleepEngine(copy, "owner").lifecycle.current().state == "active"
+        assert SleepIntegrity(copy).verify("owner") == integrity
+        assert EventStore(copy).verify_chain("owner") == chain
+        with pytest.raises(InteractionStateConflictError, match="reflection was erased"):
+            PublicDiaryStore(copy).publish("owner", sleep_id, "revived", "old diary body")
+        with copy.transaction() as connection, pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "UPDATE sleep_reflections SET summary='revived' WHERE sleep_id=?", (sleep_id,)
+            )
+        with copy.read_transaction() as connection:
+            assert connection.execute(
+                "SELECT job_id,original_hash,erased_hash FROM private_erasure_receipts "
+                "WHERE record_table='sleep_reflections' AND record_id=?",
+                (original["reflection_id"],),
+            ).fetchone()[:] == (result["job_id"], original["plan_hash"], ERASED_REFLECTION_HASH)
+    assert RuntimeLogExporter(restored[-1]).export("owner", actor="fixture").row_count > 0
+
+
+def test_sleep_reflection_erasure_is_atomic_on_verification_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db = Database(tmp_path / "noyra.sqlite3")
+    window, message, event = _private_message(db)
+    sleep_id, call_id, memory_id = _integrated_sleep_memory(db, message, event, "rollback fixture")
+    original_memory = MemoryStore(db).get(memory_id)
+    original_revisions = MemoryStore(db).revisions(memory_id)
+    original = _reflection_row(db, sleep_id)
+    call = ModelLedger(db).get_call(call_id)
+    erasure = ConversationErasure(db)
+    erasure.request("owner", window["conversation_id"], expected_revision=1, confirmed=True)
+
+    def fail_verification(connection: sqlite3.Connection, *_: Any) -> None:
+        assert (
+            connection.execute(
+                "SELECT plan_hash FROM sleep_reflections WHERE sleep_id=?", (sleep_id,)
+            ).fetchone()[0]
+            == ERASED_REFLECTION_HASH
+        )
+        assert (
+            connection.execute(
+                "SELECT content FROM memories WHERE memory_id=?", (memory_id,)
+            ).fetchone()[0]
+            == ERASED
+        )
+        raise IntegrityError("fixture post-write verification failure")
+
+    with monkeypatch.context() as failure:
+        failure.setattr(
+            RecoveryErasure, "_verify_reflection_receipts", staticmethod(fail_verification)
+        )
+        result = erasure.run("owner", window["conversation_id"])
+    assert result["status"] == "failed" and result["error_code"] == "erasure_storage_error"
+    assert _reflection_row(db, sleep_id) == original
+    assert MemoryStore(db).get(memory_id) == original_memory
+    assert MemoryStore(db).revisions(memory_id) == original_revisions
+    assert ModelLedger(db).get_call(call_id) == call
+    assert InteractionStore(db).get(message).content == "private original"
+    with db.read_transaction() as connection:
+        assert not connection.execute("SELECT 1 FROM private_erasure_receipts").fetchone()
+        assert _row(connection, "owner", window["conversation_id"])["status"] == "deleting"
+    assert erasure.run("owner", window["conversation_id"])["status"] == "completed"
+    assert MemoryStore(db).get(memory_id).content == ERASED
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "missing_binding",
+        "other_window",
+        "open_run",
+        "invalid_plan",
+        "independent_mismatch",
+        "diary",
+        "runtime_export",
+    ],
+)
+def test_sleep_reflection_erasure_rejects_unreviewed_scope(tmp_path: Path, case: str) -> None:
+    db = Database(tmp_path / "noyra.sqlite3")
+    window, message, _ = _private_message(db)
+    inputs: tuple[str, ...] = (message,)
+    if case in {"other_window", "independent_mismatch"}:
+        second = ConversationStore(db).create("owner", "second window")
+        other = InteractionStore(db).receive(
+            "owner",
+            "web",
+            "web-user",
+            "independent input",
+            conversation_id=second["conversation_id"],
+        )
+        if case == "other_window":
+            inputs += (other.interaction_id,)
+        else:
+            _sleep_reflection(db, (other.interaction_id,), "other plan", match_response=False)
+    sleep_id, call_id = _sleep_reflection(
+        db,
+        inputs,
+        "review fixture",
+        bound=case != "missing_binding",
+        complete=case != "open_run",
+        match_response=case != "invalid_plan",
+    )
+    if case == "diary":
+        PublicDiaryStore(db).publish("owner", sleep_id, "fixture", "review fixture diary candidate")
+    if case == "runtime_export":
+        RuntimeLogExporter(db).export_to_path(
+            "owner", actor="fixture", target=tmp_path / "runtime.zip"
+        )
+    before = _reflection_row(db, sleep_id)
+    call = ModelLedger(db).get_call(call_id)
+    reason = {
+        "other_window": "cross_window_derivative_review_required",
+        "runtime_export": "private_legacy_export_review_required",
+    }.get(case, "reflection_derivative_review_required")
+    erasure = ConversationErasure(db)
+    assert erasure.assess("owner", window["conversation_id"])["reason_code"] == reason
+    with pytest.raises(ErasureReviewRequired, match=reason):
+        erasure.request("owner", window["conversation_id"], expected_revision=1, confirmed=True)
+    assert not erasure.root.exists()
+    assert _reflection_row(db, sleep_id) == before
+    assert ModelLedger(db).get_call(call_id) == call
+    assert InteractionStore(db).get(message).content == "private original"
+
+
+def test_sleep_reflection_erasure_fences_unmanaged_runtime_export(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db = Database(tmp_path / "noyra.sqlite3")
+    window, message, _ = _private_message(db)
+    _sleep_reflection(db, (message,), "reflection included in stale export")
+    erasure = ConversationErasure(db)
+    file_hash = RuntimeLogExporter._file_hash
+
+    def finish_erasure(path: Path, **kwargs: Any) -> str:
+        digest = file_hash(path, **kwargs)
+        erasure.request("owner", window["conversation_id"], expected_revision=1, confirmed=True)
+        result = erasure.run("owner", window["conversation_id"])
+        assert result["status"] == "completed", result
+        return digest
+
+    monkeypatch.setattr(RuntimeLogExporter, "_file_hash", staticmethod(finish_erasure))
+    destination = tmp_path / "runtime.zip"
+    with pytest.raises(ExportCancelledError, match="private content changed"):
+        RuntimeLogExporter(db).export_to_path("owner", actor="fixture", target=destination)
+    assert not destination.exists()
+    assert not list(tmp_path.glob(".runtime.zip.*"))
+
+
+def test_completed_sleep_reflection_restore_rejects_retained_projection(tmp_path: Path) -> None:
+    root = tmp_path / "current"
+    db = Database(root / "noyra.sqlite3")
+    window, message, _ = _private_message(db)
+    sleep_id, _ = _sleep_reflection(db, (message,), "residual fixture")
+    erasure = ConversationErasure(db)
+    erasure.request("owner", window["conversation_id"], expected_revision=1, confirmed=True)
+    assert erasure.run("owner", window["conversation_id"])["status"] == "completed"
+    # Model historical corruption in the fixture, retaining the reviewed schema.
+    with db.transaction() as connection:
+        trigger = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE name='prevent_sleep_reflection_update'"
+        ).fetchone()[0]
+        connection.execute("DROP TRIGGER prevent_sleep_reflection_update")
+        connection.execute(
+            "UPDATE sleep_reflections SET unresolved_questions_json=? WHERE sleep_id=?",
+            (canonical_json(["old private question"]), sleep_id),
+        )
+        connection.execute(trigger)
+    db.assert_schema_contract()
+    with pytest.raises(IntegrityError, match="sleep reflection residual"):
+        SleepIntegrity(db).verify("owner")
+    keyring = tmp_path / "keyring.json"
+    BackupKeyring.initialize(keyring)
+    manager = EncryptedBackupManager(root, keyring)
+    backup = tmp_path / "damaged-backup.noyra-backup"
+    manager.create(backup)
+    destination = tmp_path / "restored"
+    with pytest.raises(IntegrityError, match="sleep reflection residual"):
+        manager.restore(backup, destination)
+    assert not destination.exists()
+    assert not list(tmp_path.glob(".noyra-restore-*"))
+
+
+def _integrated_sleep_memory(
+    db: Database, message: str, event: str, text: str
+) -> tuple[str, str, str]:
+    sleep_id, call_id = _sleep_reflection(
+        db,
+        (message,),
+        "fixture integration",
+        memories=(
+            SleepMemory(content=text, salience=0.4, confidence=0.7, source_event_ids=(event,)),
+        ),
+    )
+    with db.read_transaction() as connection:
+        memory_id = connection.execute(
+            "SELECT target_id FROM sleep_integrations WHERE sleep_id=?", (sleep_id,)
+        ).fetchone()[0]
+    return sleep_id, call_id, memory_id
+
+
+def test_exclusive_sleep_memory_erasure_clears_encrypted_backup_replays(tmp_path: Path) -> None:
+    root = tmp_path / "current"
+    db = Database(root / "noyra.sqlite3")
+    window, message, event = _private_message(db)
+    original = "originalsleepmemorysecretfixture"
+    revised = "revisedsleepmemorysecretfixture"
+    reason = "revisionsleepmemorysecretfixture"
+    sleep_id, call_id, memory_id = _integrated_sleep_memory(db, message, event, original)
+    memories = MemoryStore(db)
+    memories.revise(
+        memory_id,
+        content=revised,
+        salience=0.5,
+        confidence=0.8,
+        status="active",
+        reason=reason,
+        source_event_ids=(event,),
+    )
+    other_event = EventStore(db).append("owner", "experience", "test", {}).event_id
+    independent = memories.create(
+        "owner",
+        "reflection",
+        "independent searchable memory",
+        salience=0.4,
+        confidence=0.7,
+        source_event_ids=(other_event,),
+    )
+    with db.transaction() as connection:
+        for target_id, body in ((memory_id, revised), (independent.memory_id, independent.content)):
+            connection.execute(
+                "INSERT INTO memory_embeddings VALUES(?,?,'mock',2,?,?,?)",
+                (
+                    target_id,
+                    "owner",
+                    canonical_json([0.2, 0.4]),
+                    content_hash([0.2, 0.4]),
+                    utc_now(),
+                ),
+            )
+            connection.execute(
+                "INSERT INTO memory_embedding_inputs VALUES (?,?)", (target_id, content_hash(body))
+            )
+        binding = dict(
+            connection.execute(
+                "SELECT * FROM sleep_integrations WHERE sleep_id=?", (sleep_id,)
+            ).fetchone()
+        )
+        assert (
+            connection.execute(
+                "SELECT memory_id FROM memory_fts WHERE memory_fts MATCH ?", (revised,)
+            ).fetchone()[0]
+            == memory_id
+        )
+    keys = tmp_path / "keyring.json"
+    BackupKeyring.initialize(keys)
+    manager = EncryptedBackupManager(root, keys)
+    before = tmp_path / "before.noyra-backup"
+    manager.create(before)
+    erasure = ConversationErasure(db)
+    erasure.request("owner", window["conversation_id"], expected_revision=1, confirmed=True)
+    result = erasure.run("owner", window["conversation_id"])
+    assert result["status"] == "completed", result
+    assert result["counts"]["sleep_memories"] == result["counts"]["exclusive_memories"] == 1
+    after = tmp_path / "after.noyra-backup"
+    manager.create(after)
+
+    for index, backup in enumerate((before, after)):
+        destination = manager.restore(backup, tmp_path / f"restored-{index}")
+        copy = Database(
+            destination / "noyra.sqlite3", initialize=False, strict_schema_contract=True
+        )
+        assert all(
+            text.encode() not in copy.path.read_bytes() for text in (original, revised, reason)
+        )
+        assert SleepIntegrity(copy).verify("owner")["sleep_integrations"] == 1
+        assert MindEngine(copy).verify_integrity("owner")["memories"] == 2
+        restored = MemoryStore(copy)
+        assert restored.get(independent.memory_id) == independent
+        assert restored.get(memory_id).content == ERASED
+        assert restored.get(memory_id).status == "archived"
+        assert len(restored.revisions(memory_id)) == 3
+        assert {revision["content"] for revision in restored.revisions(memory_id)} == {ERASED}
+        assert {revision["reason"] for revision in restored.revisions(memory_id)} == {
+            "privacy erasure"
+        }
+        assert ModelLedger(copy).get_call(call_id).response == ERASED_MODEL
+        assert _reflection_row(copy, sleep_id)["plan_hash"] == ERASED_REFLECTION_HASH
+        with copy.read_transaction() as connection:
+            assert (
+                dict(
+                    connection.execute(
+                        "SELECT * FROM sleep_integrations WHERE sleep_id=?", (sleep_id,)
+                    ).fetchone()
+                )
+                == binding
+            )
+            assert (
+                connection.execute(
+                    "SELECT original_hash FROM private_erasure_receipts WHERE record_table="
+                    "'sleep_integrations' AND record_id=? AND job_id=?",
+                    (binding["integration_id"], result["job_id"]),
+                ).fetchone()[0]
+                == binding["result_hash"]
+            )
+            assert [
+                row[0] for row in connection.execute("SELECT memory_id FROM memory_embeddings")
+            ] == [independent.memory_id]
+            assert [
+                row[0]
+                for row in connection.execute("SELECT memory_id FROM memory_embedding_inputs")
+            ] == [independent.memory_id]
+            assert not connection.execute(
+                "SELECT 1 FROM memory_fts WHERE memory_fts MATCH ?", (revised,)
+            ).fetchone()
+            assert (
+                connection.execute(
+                    "SELECT memory_id FROM memory_fts WHERE memory_fts MATCH 'searchable'"
+                ).fetchone()[0]
+                == independent.memory_id
+            )
+
+
+@pytest.mark.parametrize(
+    "case", ["uncaptured_input", "mixed_revision", "bad_receipt", "other_sleep"]
+)
+def test_sleep_memory_erasure_rejects_unproven_lineage(tmp_path: Path, case: str) -> None:
+    db = Database(tmp_path / "noyra.sqlite3")
+    window, message, event = _private_message(db)
+    if case == "uncaptured_input":
+        additional = InteractionStore(db).receive(
+            "owner",
+            "web",
+            "web-user",
+            "uncaptured input",
+            conversation_id=window["conversation_id"],
+        )
+        with db.read_transaction() as connection:
+            event = connection.execute(
+                "SELECT event_id FROM events WHERE subject_id='owner' "
+                "AND event_type='interaction_received' "
+                "AND json_extract(payload_json,'$.interaction_id')=?",
+                (additional.interaction_id,),
+            ).fetchone()[0]
+    source_message = message
+    if case == "other_sleep":
+        other_window = ConversationStore(db).create("owner", "separate window")
+        source_message = (
+            InteractionStore(db)
+            .receive(
+                "owner",
+                "web",
+                "web-user",
+                "separate input",
+                conversation_id=other_window["conversation_id"],
+            )
+            .interaction_id
+        )
+    sleep_id, call_id, memory_id = _integrated_sleep_memory(
+        db, source_message, event, "fixture memory"
+    )
+    if case == "mixed_revision":
+        other_event = EventStore(db).append("owner", "experience", "test", {}).event_id
+        MemoryStore(db).revise(
+            memory_id,
+            content="mixed revision",
+            salience=0.5,
+            confidence=0.8,
+            status="active",
+            reason="fixture",
+            source_event_ids=(event, other_event),
+        )
+    if case == "bad_receipt":
+        _replace_sleep_integration_hash(db, sleep_id)
+    original = MemoryStore(db).revisions(memory_id)
+    reflection = _reflection_row(db, sleep_id)
+    call = ModelLedger(db).get_call(call_id)
+    erasure = ConversationErasure(db)
+    reason_code = "reflection_derivative_review_required"
+    assert erasure.assess("owner", window["conversation_id"])["reason_code"] == reason_code
+    with pytest.raises(ErasureReviewRequired, match=reason_code):
+        erasure.request("owner", window["conversation_id"], expected_revision=1, confirmed=True)
+    assert not erasure.root.exists()
+    assert MemoryStore(db).revisions(memory_id) == original
+    assert _reflection_row(db, sleep_id) == reflection
+    assert ModelLedger(db).get_call(call_id) == call
+
+
+@pytest.mark.parametrize("reverted", [False, True])
+def test_private_contradiction_integration_reason_and_output_are_erased_with_backups(
+    tmp_path: Path, reverted: bool
+) -> None:
+    root = tmp_path / "current"
+    db = Database(root / "noyra.sqlite3")
+    window, message, private_event = _private_message(db)
+    _sleep_id, call_id, private_memory_id = _integrated_sleep_memory(
+        db, message, private_event, "private source memory for contradiction"
+    )
+    independent_event = EventStore(db).append(
+        "owner", "independent_experience", "fixture", {"fact": "independent source evidence"}
+    )
+    independent = MemoryStore(db).create(
+        "owner",
+        "semantic",
+        "independent source memory",
+        salience=0.4,
+        confidence=0.6,
+        source_event_ids=(independent_event.event_id,),
+    )
+    synthesis = "private contradiction synthesis must be removed"
+    private_reason = "private user's detailed conflict reason must be removed"
+    private_revert_reason = "private subsequent reversal rationale"
+    integration = MemoryIntegrationSupervisor(db, "owner").integrate(
+        "contradict",
+        (private_memory_id, independent.memory_id),
+        synthesis=synthesis,
+        confidence=0.4,
+        evidence_event_ids=(independent_event.event_id,),
+        reason=private_reason,
+    )
+    with db.transaction() as connection, pytest.raises(sqlite3.IntegrityError):
+        connection.execute(
+            "UPDATE memory_integrations SET reason='unauthorized edit' WHERE integration_id=?",
+            (integration.integration_id,),
+        )
+    with db.transaction() as connection, pytest.raises(sqlite3.IntegrityError):
+        connection.execute(
+            "UPDATE memory_integration_revisions SET reason='unauthorized edit' "
+            "WHERE integration_id=?",
+            (integration.integration_id,),
+        )
+    if reverted:
+        integration = MemoryIntegrationSupervisor(db, "owner").revert(
+            integration.integration_id, reason="private subsequent reversal rationale"
+        )
+    with db.read_transaction() as connection:
+        original = dict(
+            connection.execute(
+                "SELECT * FROM memory_integrations WHERE integration_id=?",
+                (integration.integration_id,),
+            ).fetchone()
+        )
+        original_revisions = [
+            dict(row)
+            for row in connection.execute(
+                "SELECT * FROM memory_integration_revisions WHERE integration_id=?",
+                (integration.integration_id,),
+            )
+        ]
+        output_id = integration.output_memory_id
+    assert output_id is not None
+    assert MemoryStore(db).get(output_id).content == synthesis
+    keys = tmp_path / "keyring.json"
+    BackupKeyring.initialize(keys)
+    manager = EncryptedBackupManager(root, keys)
+    before = tmp_path / "before-private-integration-erasure.noyra-backup"
+    manager.create(before)
+
+    erasure = ConversationErasure(db)
+    result = erasure.assess("owner", window["conversation_id"])
+    assert result["status"] == "full_contract_pending"
+    assert result["deletion_available"] is False
+    erasure.request("owner", window["conversation_id"], expected_revision=1, confirmed=True)
+    completed = erasure.run("owner", window["conversation_id"])
+    assert completed["status"] == "completed", completed
+    assert completed["counts"]["memory_integration_records"] == 1
+    assert completed["counts"]["memory_integration_revisions"] == len(original_revisions)
+    assert completed["counts"]["discarded_mixed_memories"] == 1
+    assert MemoryStore(db).get(output_id).content == ERASED
+    assert MemoryStore(db).get(independent.memory_id).content == independent.content
+    assert MemoryStore(db).get(independent.memory_id).status == independent.status
+    after = tmp_path / "after-private-integration-erasure.noyra-backup"
+    manager.create(after)
+
+    for index, backup in enumerate((before, after)):
+        destination = manager.restore(backup, tmp_path / f"restored-private-integration-{index}")
+        copy = Database(
+            destination / "noyra.sqlite3", initialize=False, strict_schema_contract=True
+        )
+        raw = copy.path.read_bytes()
+        assert synthesis.encode() not in raw
+        assert private_reason.encode() not in raw
+        if reverted:
+            assert private_revert_reason.encode() not in raw
+        assert MemoryStore(copy).get(output_id).content == ERASED
+        assert MemoryStore(copy).get(independent.memory_id) == independent
+        assert ModelLedger(copy).get_call(call_id).response == ERASED_MODEL
+        assert SleepIntegrity(copy).verify("owner")["sleep_runs"] == 1
+        assert MemoryStore(copy).verify_lifecycle_integrity("owner")["memory_integrations"] == 1
+        with copy.read_transaction() as connection:
+            redacted = dict(
+                connection.execute(
+                    "SELECT * FROM memory_integrations WHERE integration_id=?",
+                    (integration.integration_id,),
+                ).fetchone()
+            )
+            redacted_revisions = [
+                dict(row)
+                for row in connection.execute(
+                    "SELECT * FROM memory_integration_revisions WHERE integration_id=?",
+                    (integration.integration_id,),
+                )
+            ]
+            assert redacted["reason"] == ERASED
+            assert redacted["source_memory_ids_json"] == original["source_memory_ids_json"]
+            assert redacted["output_memory_id"] == original["output_memory_id"]
+            assert len(redacted_revisions) == len(original_revisions)
+            assert all(revision["reason"] == ERASED for revision in redacted_revisions)
+            receipt_targets = [
+                ("memory_integrations", integration.integration_id),
+                *(
+                    ("memory_integration_revisions", revision["revision_id"])
+                    for revision in original_revisions
+                ),
+            ]
+            for table, record_id in receipt_targets:
+                receipt = connection.execute(
+                    "SELECT original_hash,erased_hash FROM private_erasure_receipts "
+                    "WHERE job_id=? AND record_table=? AND record_id=?",
+                    (completed["job_id"], table, record_id),
+                ).fetchone()
+                assert receipt is not None
+                assert receipt["original_hash"] != receipt["erased_hash"]
+        with copy.transaction() as connection, pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "UPDATE memory_integrations SET reason='revived' WHERE integration_id=?",
+                (integration.integration_id,),
+            )
+        for revision in original_revisions:
+            with copy.transaction() as connection, pytest.raises(sqlite3.IntegrityError):
+                connection.execute(
+                    "UPDATE memory_integration_revisions SET reason='revived' WHERE revision_id=?",
+                    (revision["revision_id"],),
+                )
+
+
+def test_contradiction_integration_chain_is_erased_to_a_verified_fixed_point(
+    tmp_path: Path,
+) -> None:
+    db = Database(tmp_path / "noyra.sqlite3")
+    window, message, private_event = _private_message(db)
+    _, call_id, private_memory_id = _integrated_sleep_memory(
+        db, message, private_event, "private memory chain root"
+    )
+    independent_event = EventStore(db).append(
+        "owner", "independent_experience", "fixture", {"fact": "independent chain source"}
+    )
+    independent = MemoryStore(db).create(
+        "owner",
+        "semantic",
+        "independent chain source memory",
+        salience=0.4,
+        confidence=0.6,
+        source_event_ids=(independent_event.event_id,),
+    )
+    supervisor = MemoryIntegrationSupervisor(db, "owner")
+    first = supervisor.integrate(
+        "contradict",
+        (private_memory_id, independent.memory_id),
+        synthesis="first private chain output",
+        confidence=0.4,
+        evidence_event_ids=(independent_event.event_id,),
+        reason="first private chain reason",
+    )
+    assert first.output_memory_id is not None
+    second = supervisor.integrate(
+        "contradict",
+        (first.output_memory_id, independent.memory_id),
+        synthesis="second private chain output",
+        confidence=0.35,
+        evidence_event_ids=(independent_event.event_id,),
+        reason="second private chain reason",
+    )
+    assert second.output_memory_id is not None
+    erasure = ConversationErasure(db)
+    erasure.request("owner", window["conversation_id"], expected_revision=1, confirmed=True)
+    result = erasure.run("owner", window["conversation_id"])
+    assert result["status"] == "completed", result
+    assert result["counts"]["memory_integration_records"] == 2
+    assert result["counts"]["memory_integration_revisions"] == 2
+    assert result["counts"]["discarded_mixed_memories"] == 2
+    for integration in (first, second):
+        assert integration.output_memory_id is not None
+        assert MemoryStore(db).get(integration.output_memory_id).content == ERASED
+    assert MemoryStore(db).get(independent.memory_id) == independent
+    assert MemoryStore(db).get(private_memory_id).content == ERASED
+    assert MemoryStore(db).verify_lifecycle_integrity("owner")["memory_integrations"] == 2
+    assert ModelLedger(db).get_call(call_id).response == ERASED_MODEL
+
+
+def test_contradiction_integration_erasure_verification_failure_rolls_back_atomically(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db = Database(tmp_path / "noyra.sqlite3")
+    window, message, private_event = _private_message(db)
+    _, call_id, private_memory_id = _integrated_sleep_memory(
+        db, message, private_event, "rollback private sleep memory"
+    )
+    independent_event = EventStore(db).append(
+        "owner", "independent_experience", "fixture", {"fact": "independent"}
+    )
+    independent = MemoryStore(db).create(
+        "owner",
+        "semantic",
+        "rollback independent source",
+        salience=0.4,
+        confidence=0.6,
+        source_event_ids=(independent_event.event_id,),
+    )
+    synthesis = "rollback private contradiction output"
+    integration = MemoryIntegrationSupervisor(db, "owner").integrate(
+        "contradict",
+        (private_memory_id, independent.memory_id),
+        synthesis=synthesis,
+        confidence=0.4,
+        evidence_event_ids=(independent_event.event_id,),
+        reason="rollback private integration rationale",
+    )
+    output_id = integration.output_memory_id
+    assert output_id is not None
+    with db.read_transaction() as connection:
+        integration_before = dict(
+            connection.execute(
+                "SELECT * FROM memory_integrations WHERE integration_id=?",
+                (integration.integration_id,),
+            ).fetchone()
+        )
+        revisions_before = [
+            dict(row)
+            for row in connection.execute(
+                "SELECT * FROM memory_integration_revisions WHERE integration_id=?",
+                (integration.integration_id,),
+            )
+        ]
+    output_before = MemoryStore(db).get(output_id)
+    private_before = MemoryStore(db).get(private_memory_id)
+    erasure = ConversationErasure(db)
+    erasure.request("owner", window["conversation_id"], expected_revision=1, confirmed=True)
+
+    def fail_after_redaction(connection: sqlite3.Connection, *args: Any) -> None:
+        row = connection.execute(
+            "SELECT reason FROM memory_integrations WHERE integration_id=?",
+            (integration.integration_id,),
+        ).fetchone()
+        assert row["reason"] == ERASED
+        assert (
+            connection.execute(
+                "SELECT content FROM memories WHERE memory_id=?", (output_id,)
+            ).fetchone()[0]
+            == ERASED
+        )
+        raise IntegrityError("injected post-integration verification failure")
+
+    with monkeypatch.context() as failure:
+        failure.setattr(
+            RecoveryErasure,
+            "_verify_memory_integration_receipts",
+            staticmethod(fail_after_redaction),
+        )
+        failed = erasure.run("owner", window["conversation_id"])
+    assert failed["status"] == "failed" and failed["error_code"] == "erasure_storage_error"
+    assert MemoryStore(db).get(output_id) == output_before
+    assert MemoryStore(db).get(private_memory_id) == private_before
+    with db.read_transaction() as connection:
+        assert (
+            dict(
+                connection.execute(
+                    "SELECT * FROM memory_integrations WHERE integration_id=?",
+                    (integration.integration_id,),
+                ).fetchone()
+            )
+            == integration_before
+        )
+        assert [
+            dict(row)
+            for row in connection.execute(
+                "SELECT * FROM memory_integration_revisions WHERE integration_id=?",
+                (integration.integration_id,),
+            )
+        ] == revisions_before
+        assert not connection.execute(
+            "SELECT 1 FROM private_erasure_receipts WHERE record_table LIKE 'memory_integration%'"
+        ).fetchone()
+        assert _row(connection, "owner", window["conversation_id"])["status"] == "deleting"
+    assert InteractionStore(db).get(message).content == "private original"
+    assert erasure.run("owner", window["conversation_id"])["status"] == "completed"
+    assert MemoryStore(db).get(output_id).content == ERASED
+    assert ModelLedger(db).get_call(call_id).response == ERASED_MODEL
+
+
+def test_unverified_contradiction_integration_requires_review_without_marker(
+    tmp_path: Path,
+) -> None:
+    db = Database(tmp_path / "noyra.sqlite3")
+    window, message, private_event = _private_message(db)
+    _, _, private_memory_id = _integrated_sleep_memory(
+        db, message, private_event, "private integration parent"
+    )
+    independent_event = EventStore(db).append(
+        "owner", "independent_experience", "fixture", {"fact": "independent"}
+    )
+    independent = MemoryStore(db).create(
+        "owner",
+        "semantic",
+        "independent integration parent",
+        salience=0.4,
+        confidence=0.6,
+        source_event_ids=(independent_event.event_id,),
+    )
+    integration = MemoryIntegrationSupervisor(db, "owner").integrate(
+        "contradict",
+        (private_memory_id, independent.memory_id),
+        synthesis="mixed output",
+        confidence=0.4,
+        evidence_event_ids=(independent_event.event_id,),
+        reason="fixture reason",
+    )
+    with db.transaction() as connection:
+        trigger = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE name='prevent_memory_integration_update'"
+        ).fetchone()[0]
+        connection.execute("DROP TRIGGER prevent_memory_integration_update")
+        connection.execute(
+            "UPDATE memory_integrations SET evidence_event_ids_json=? WHERE integration_id=?",
+            (canonical_json(["missing-evidence-event"]), integration.integration_id),
+        )
+        connection.execute(trigger)
+    erasure = ConversationErasure(db)
+    with pytest.raises(IntegrityError, match=r"memory integration .* state hash mismatch"):
+        erasure.assess("owner", window["conversation_id"])
+    assert not erasure.root.exists()
+    assert InteractionStore(db).get(message).content == "private original"
+
+
+def test_schema120_upgrade_preserves_integrations_and_allows_audited_revert(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "integration-v120.sqlite3"
+    with monkeypatch.context() as old_schema:
+        old_schema.setattr(database_module, "CURRENT_SCHEMA_VERSION", 120)
+        db = Database(path)
+        window, _, _ = _private_message(db)
+        event = EventStore(db).append("owner", "experience", "fixture", {"safe": True})
+        source_ids = tuple(
+            MemoryStore(db)
+            .create(
+                "owner",
+                "semantic",
+                f"schema source {index}",
+                salience=0.4,
+                confidence=0.6,
+                source_event_ids=(event.event_id,),
+            )
+            .memory_id
+            for index in range(2)
+        )
+        integration = MemoryIntegrationSupervisor(db, "owner").integrate(
+            "contradict",
+            source_ids,
+            synthesis="preserved pre-migration output",
+            confidence=0.4,
+            evidence_event_ids=(event.event_id,),
+            reason="pre-migration reason",
+        )
+        before = MemoryStore(db).verify_lifecycle_integrity("owner")
+        with db.read_transaction() as connection:
+            row_before = dict(
+                connection.execute(
+                    "SELECT * FROM memory_integrations WHERE integration_id=?",
+                    (integration.integration_id,),
+                ).fetchone()
+            )
+    upgraded = Database(path, strict_schema_contract=True)
+    with upgraded.read_transaction() as connection:
+        assert connection.execute(
+            "SELECT value FROM schema_meta WHERE key='schema_version'"
+        ).fetchone()[0] == str(database_module.CURRENT_SCHEMA_VERSION)
+        assert (
+            connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='trigger' "
+                "AND name='prevent_memory_integration_update'"
+            ).fetchone()
+            is not None
+        )
+        row_after = dict(
+            connection.execute(
+                "SELECT * FROM memory_integrations WHERE integration_id=?",
+                (integration.integration_id,),
+            ).fetchone()
+        )
+    assert row_after == row_before
+    with upgraded.transaction() as connection, pytest.raises(sqlite3.IntegrityError):
+        connection.execute(
+            "UPDATE memory_integrations SET reason='migration bypass' WHERE integration_id=?",
+            (integration.integration_id,),
+        )
+    reverted = MemoryIntegrationSupervisor(upgraded, "owner").revert(
+        integration.integration_id, reason="audited post-migration reversal"
+    )
+    assert reverted.status == "reverted"
+    assert (
+        MemoryStore(upgraded).verify_lifecycle_integrity("owner")["memory_integrations"]
+        == (before["memory_integrations"])
+    )
+    assert (
+        ConversationStore(upgraded).list("owner")["items"][0]["conversation_id"]
+        == (window["conversation_id"])
+    )
+
+
+@pytest.mark.parametrize("operation", ["merge", "supersede"])
+def test_memory_integration_merge_and_supersede_remain_fail_closed(
+    tmp_path: Path, operation: str
+) -> None:
+    db = Database(tmp_path / "noyra.sqlite3")
+    window, message, private_event = _private_message(db)
+    _, _, private_memory_id = _integrated_sleep_memory(
+        db, message, private_event, "private source memory"
+    )
+    independent_event = EventStore(db).append(
+        "owner", "independent_experience", "fixture", {"fact": "independent evidence"}
+    )
+    independent = MemoryStore(db).create(
+        "owner",
+        "semantic",
+        "independent source memory",
+        salience=0.4,
+        confidence=0.6,
+        source_event_ids=(independent_event.event_id,),
+    )
+    integration = MemoryIntegrationSupervisor(db, "owner").integrate(
+        operation,
+        (private_memory_id, independent.memory_id),
+        synthesis="mixed output",
+        confidence=0.4,
+        evidence_event_ids=(independent_event.event_id,),
+        reason="fixture reason",
+    )
+    assert integration.output_memory_id is not None
+    output = MemoryStore(db).get(integration.output_memory_id)
+    erasure = ConversationErasure(db)
+    assert erasure.assess("owner", window["conversation_id"])["reason_code"] == (
+        "memory_integration_review_required"
+    )
+    with pytest.raises(ErasureReviewRequired, match="memory_integration_review_required"):
+        erasure.request("owner", window["conversation_id"], expected_revision=1, confirmed=True)
+    assert not erasure.root.exists()
+    assert MemoryStore(db).get(output.memory_id) == output
+    assert InteractionStore(db).get(message).content == "private original"
+
+
+@pytest.mark.parametrize("archived", [False, True])
+def test_sleep_reflection_mixed_memory_rebuilds_only_pre_window_revision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, archived: bool
+) -> None:
+    from noyra.core.events import EventStore
+
+    root = tmp_path / "current"
+    db = Database(root / "noyra.sqlite3")
+    IdentityStore(db).ensure("owner", content_hash("owner"))
+    with monkeypatch.context() as prior_event:
+        prior_event.setattr("noyra.core.events.utc_now", lambda: "1999-01-01T00:00:00.000+00:00")
+        independent_event = EventStore(db).append(
+            "owner", "independent_experience", "fixture", {"text": "stable older evidence"}
+        )
+    original_memory_content = "pre window sleep model substrate"
+    memory = MemoryStore(db, clock=lambda: "2000-01-01T00:00:00.000+00:00").create(
+        "owner",
+        "episodic",
+        original_memory_content,
+        salience=0.4,
+        confidence=0.6,
+        source_event_ids=(independent_event.event_id,),
+    )
+    window, message, _ = _private_message(db)
+    sleep_id, call_id = _sleep_reflection(db, (message,), "mixed downstream")
+    reflection_event = SleepEngine(db, "owner").get(sleep_id).reflection_event_id
+    assert reflection_event is not None
+    mixed_content = "later content influenced by private sleep reflection"
+    MemoryStore(db).revise(
+        memory.memory_id,
+        content=mixed_content,
+        salience=0.8,
+        confidence=0.9,
+        status="archived" if archived else "active",
+        reason="sleep-derived synthesis",
+        source_event_ids=(reflection_event, independent_event.event_id),
+    )
+    before_revisions = MemoryStore(db).revisions(memory.memory_id)
+    assert len(before_revisions) == 2
+    assert before_revisions[1]["content"] == mixed_content
+    keyring = tmp_path / "keyring.json"
+    BackupKeyring.initialize(keyring)
+    manager = EncryptedBackupManager(root, keyring)
+    before = tmp_path / "before-mixed-erasure.noyra-backup"
+    manager.create(before)
+
+    erasure = ConversationErasure(db)
+    assessment = erasure.assess("owner", window["conversation_id"])
+    assert assessment["status"] == "full_contract_pending"
+    assert assessment["deletion_available"] is False
+    erasure.request("owner", window["conversation_id"], expected_revision=1, confirmed=True)
+    result = erasure.run("owner", window["conversation_id"])
+    assert result["status"] == "completed", result
+    assert result["counts"]["reconstructed_memories"] == 1
+    assert result["counts"]["exclusive_memories"] == 0
+    assert result["counts"].get("sleep_memories", 0) == 0
+    assert MemoryStore(db).get(memory.memory_id).content == ERASED
+    after = tmp_path / "after-mixed-erasure.noyra-backup"
+    manager.create(after)
+
+    for index, backup in enumerate((before, after)):
+        destination = manager.restore(backup, tmp_path / f"restored-mixed-{index}")
+        copy = Database(
+            destination / "noyra.sqlite3", initialize=False, strict_schema_contract=True
+        )
+        assert mixed_content.encode() not in copy.path.read_bytes()
+        assert original_memory_content.encode() in copy.path.read_bytes()
+        assert MemoryStore(copy).get(memory.memory_id).content == ERASED
+        assert all(
+            revision["content"] == ERASED and revision["reason"] == "privacy erasure"
+            for revision in MemoryStore(copy).revisions(memory.memory_id)
+        )
+        with copy.read_transaction() as connection:
+            replacements = connection.execute(
+                "SELECT * FROM memories WHERE memory_id!=? AND subject_id='owner'",
+                (memory.memory_id,),
+            ).fetchall()
+            assert len(replacements) == 1
+            replacement = replacements[0]
+            assert replacement["content"] == original_memory_content
+            assert replacement["status"] == ("archived" if archived else "active")
+            assert MemoryStore(copy).source_event_ids(replacement["memory_id"]) == (
+                independent_event.event_id,
+            )
+            assert not connection.execute(
+                "SELECT 1 FROM memory_fts WHERE memory_fts MATCH ?", (mixed_content,)
+            ).fetchone()
+        assert ModelLedger(copy).get_call(call_id).response == ERASED_MODEL
+        assert MindEngine(copy).verify_integrity("owner")["memories"] == 2
+        assert SleepIntegrity(copy).verify("owner")["sleep_runs"] == 1
+
+
+@pytest.mark.parametrize("duplicate_keeper", [False, True])
+def test_sleep_memory_consolidation_descendants_are_erased_and_backups_replay(
+    tmp_path: Path, duplicate_keeper: bool
+) -> None:
+    root = tmp_path / "current"
+    db = Database(root / "noyra.sqlite3")
+    IdentityStore(db).ensure("owner", content_hash("owner"))
+    independent_event = EventStore(db).append(
+        "owner", "independent_experience", "fixture", {"fact": "older independent fact"}
+    )
+    memory_text = (
+        "independent duplicate payload" if duplicate_keeper else "independent cluster fact"
+    )
+    independent = MemoryStore(db).create(
+        "owner",
+        "reflection",
+        memory_text,
+        salience=0.2 if duplicate_keeper else 0.25,
+        confidence=0.5,
+        source_event_ids=(independent_event.event_id,),
+    )
+    window, message, private_event = _private_message(db)
+    sleep_memory_text = memory_text if duplicate_keeper else "private sleep-derived cluster member"
+    sleep_id, call_id = _sleep_reflection(
+        db,
+        (message,),
+        "consolidation lineage",
+        memories=(
+            SleepMemory(
+                content=sleep_memory_text,
+                memory_type="reflection",
+                salience=0.15,
+                confidence=0.4,
+                source_event_ids=(private_event,),
+            ),
+        ),
+    )
+    with db.read_transaction() as connection:
+        private_memory_id = connection.execute(
+            "SELECT target_id FROM sleep_integrations WHERE sleep_id=? "
+            "AND integration_type='memory'",
+            (sleep_id,),
+        ).fetchone()[0]
+    private_memory = MemoryStore(db).get(private_memory_id)
+    if duplicate_keeper:
+        assert private_memory.memory_type == independent.memory_type
+        assert private_memory.content == independent.content
+    consolidator = MemoryConsolidator(
+        db,
+        "owner",
+        interval_seconds=0,
+        stale_after_days=0,
+        archive_after_days=0,
+        minimum_active_memories=0,
+    )
+    assert consolidator.run_due() == "memory_consolidation_committed"
+    with db.read_transaction() as connection:
+        run = dict(
+            connection.execute(
+                "SELECT * FROM memory_consolidation_runs ORDER BY rowid DESC LIMIT 1"
+            ).fetchone()
+        )
+        members = [
+            dict(row)
+            for row in connection.execute(
+                "SELECT * FROM memory_consolidation_members "
+                "WHERE consolidation_id=? ORDER BY rowid",
+                (run["consolidation_id"],),
+            )
+        ]
+        summary_ids = json.loads(run["summary_memory_ids_json"])
+        summaries = [
+            dict(
+                connection.execute(
+                    "SELECT * FROM memories WHERE memory_id=?", (memory_id,)
+                ).fetchone()
+            )
+            for memory_id in summary_ids
+        ]
+    assert any(row["source_memory_id"] == private_memory_id for row in members)
+    if duplicate_keeper:
+        assert (
+            next(row for row in members if row["source_memory_id"] == private_memory_id)[
+                "disposition"
+            ]
+            == "archived_duplicate"
+        )
+    else:
+        assert summaries and all(
+            row["content"].startswith("Consolidated memory cluster: ") for row in summaries
+        )
+    keys = tmp_path / "keyring.json"
+    BackupKeyring.initialize(keys)
+    manager = EncryptedBackupManager(root, keys)
+    before = tmp_path / "before-consolidation-erasure.noyra-backup"
+    manager.create(before)
+
+    erasure = ConversationErasure(db)
+    assessment = erasure.assess("owner", window["conversation_id"])
+    assert assessment["status"] == "full_contract_pending"
+    assert assessment["deletion_available"] is False
+    erasure.request("owner", window["conversation_id"], expected_revision=1, confirmed=True)
+    result = erasure.run("owner", window["conversation_id"])
+    assert result["status"] == "completed", result
+    after = tmp_path / "after-consolidation-erasure.noyra-backup"
+    manager.create(after)
+
+    for index, backup in enumerate((before, after)):
+        destination = manager.restore(backup, tmp_path / f"restored-consolidation-{index}")
+        copy = Database(
+            destination / "noyra.sqlite3", initialize=False, strict_schema_contract=True
+        )
+        assert b"private sleep-derived cluster member" not in copy.path.read_bytes()
+        assert SleepIntegrity(copy).verify("owner")["sleep_runs"] == 1
+        assert MindEngine(copy).verify_integrity("owner")["memories"] >= 2
+        assert MemoryStore(copy).get(private_memory_id).content == ERASED
+        assert all(
+            revision["content"] == ERASED
+            for revision in MemoryStore(copy).revisions(private_memory_id)
+        )
+        assert ModelLedger(copy).get_call(call_id).response == ERASED_MODEL
+        if duplicate_keeper:
+            assert MemoryStore(copy).get(independent.memory_id).content == ERASED
+            with copy.read_transaction() as connection:
+                retained = connection.execute(
+                    "SELECT memory_id,status FROM memories WHERE subject_id=? AND content=? "
+                    "AND memory_id NOT IN (?,?)",
+                    ("owner", memory_text, private_memory_id, independent.memory_id),
+                ).fetchall()
+            assert len(retained) == 1
+            assert retained[0]["status"] == "archived"
+            assert MemoryStore(copy).source_event_ids(retained[0]["memory_id"]) == (
+                independent_event.event_id,
+            )
+        else:
+            assert MemoryStore(copy).get(independent.memory_id).status == "archived"
+            assert MemoryStore(copy).get(independent.memory_id).content == memory_text
+        with copy.read_transaction() as connection:
+            assert (
+                dict(
+                    connection.execute(
+                        "SELECT * FROM memory_consolidation_runs WHERE consolidation_id=?",
+                        (run["consolidation_id"],),
+                    ).fetchone()
+                )
+                == run
+            )
+            restored_members = [
+                dict(row)
+                for row in connection.execute(
+                    "SELECT * FROM memory_consolidation_members "
+                    "WHERE consolidation_id=? ORDER BY rowid",
+                    (run["consolidation_id"],),
+                )
+            ]
+            assert restored_members == members
+            for summary in summaries:
+                assert (
+                    connection.execute(
+                        "SELECT content FROM memories WHERE memory_id=?", (summary["memory_id"],)
+                    ).fetchone()[0]
+                    == ERASED
+                )
+
+
+def test_reused_consolidation_summary_without_new_safe_revision_requires_review(
+    tmp_path: Path,
+) -> None:
+    db = Database(tmp_path / "noyra.sqlite3")
+    window, message, private_event = _private_message(db)
+    independent_event = EventStore(db).append(
+        "owner", "independent_experience", "fixture", {"fact": "unrelated old evidence"}
+    )
+    sleep_id, _ = _sleep_reflection(
+        db,
+        (message,),
+        "legacy summary reuse",
+        memories=(
+            SleepMemory(
+                content="private member in reused summary",
+                memory_type="reflection",
+                salience=0.15,
+                confidence=0.4,
+                source_event_ids=(private_event,),
+            ),
+        ),
+    )
+    with db.read_transaction() as connection:
+        private_memory_id = connection.execute(
+            "SELECT target_id FROM sleep_integrations WHERE sleep_id=?", (sleep_id,)
+        ).fetchone()[0]
+    independent = MemoryStore(db).create(
+        "owner",
+        "reflection",
+        "unrelated old consolidation member",
+        salience=0.2,
+        confidence=0.4,
+        source_event_ids=(independent_event.event_id,),
+    )
+    cluster = tuple(sorted((private_memory_id, independent.memory_id)))
+    reused_summary = MemoryStore(db).create(
+        "owner",
+        "reflection",
+        "Consolidated memory cluster: " + ", ".join(cluster),
+        salience=0.45,
+        confidence=0.45,
+        source_event_ids=(independent_event.event_id,),
+        reason="fixture legacy summary",
+    )
+    assert (
+        MemoryConsolidator(
+            db,
+            "owner",
+            interval_seconds=0,
+            stale_after_days=0,
+            archive_after_days=0,
+            minimum_active_memories=0,
+        ).run_due()
+        == "memory_consolidation_committed"
+    )
+    with db.read_transaction() as connection:
+        run = connection.execute(
+            "SELECT summary_memory_ids_json FROM memory_consolidation_runs "
+            "ORDER BY rowid DESC LIMIT 1"
+        ).fetchone()
+        assert json.loads(run[0]) == []
+        assert connection.execute(
+            "SELECT 1 FROM memory_consolidation_members WHERE source_memory_id=? "
+            "AND result_memory_id=?",
+            (private_memory_id, reused_summary.memory_id),
+        ).fetchone()
+    before = MemoryStore(db).get(reused_summary.memory_id)
+    erasure = ConversationErasure(db)
+    assert erasure.assess("owner", window["conversation_id"])["reason_code"] == (
+        "memory_consolidation_review_required"
+    )
+    with pytest.raises(ErasureReviewRequired, match="memory_consolidation_review_required"):
+        erasure.request("owner", window["conversation_id"], expected_revision=1, confirmed=True)
+    assert not erasure.root.exists()
+    assert MemoryStore(db).get(reused_summary.memory_id) == before
+    assert InteractionStore(db).get(message).content == "private original"
+
+
+def test_sleep_consolidation_tampered_membership_requires_review(tmp_path: Path) -> None:
+    db = Database(tmp_path / "noyra.sqlite3")
+    window, message, private_event = _private_message(db)
+    sleep_id, _ = _sleep_reflection(
+        db,
+        (message,),
+        "tampered consolidation",
+        memories=(
+            SleepMemory(
+                content="sleep memory for consolidation",
+                memory_type="reflection",
+                salience=0.2,
+                confidence=0.4,
+                source_event_ids=(private_event,),
+            ),
+        ),
+    )
+    with db.read_transaction() as connection:
+        memory_id = connection.execute(
+            "SELECT target_id FROM sleep_integrations WHERE sleep_id=?", (sleep_id,)
+        ).fetchone()[0]
+    assert (
+        MemoryConsolidator(
+            db,
+            "owner",
+            interval_seconds=0,
+            stale_after_days=0,
+            archive_after_days=0,
+            minimum_active_memories=0,
+        ).run_due()
+        == "memory_consolidation_committed"
+    )
+    with db.transaction() as connection:
+        trigger = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE name='prevent_memory_consolidation_member_update'"
+        ).fetchone()[0]
+        connection.execute("DROP TRIGGER prevent_memory_consolidation_member_update")
+        connection.execute(
+            "UPDATE memory_consolidation_members SET reason='tampered free text' "
+            "WHERE source_memory_id=?",
+            (memory_id,),
+        )
+        connection.execute(trigger)
+    before = MemoryStore(db).get(memory_id)
+    erasure = ConversationErasure(db)
+    assert erasure.assess("owner", window["conversation_id"])["reason_code"] == (
+        "memory_consolidation_review_required"
+    )
+    with pytest.raises(ErasureReviewRequired, match="memory_consolidation_review_required"):
+        erasure.request("owner", window["conversation_id"], expected_revision=1, confirmed=True)
+    assert not erasure.root.exists()
+    assert MemoryStore(db).get(memory_id) == before
+    assert InteractionStore(db).get(message).content == "private original"
+
+
+def test_sleep_reflection_mixed_memory_without_pre_window_revision_requires_review(
+    tmp_path: Path,
+) -> None:
+    db = Database(tmp_path / "noyra.sqlite3")
+    window, message, _ = _private_message(db)
+    independent_event = EventStore(db).append(
+        "owner", "independent_experience", "fixture", {"text": "later independent citation"}
+    )
+    sleep_id, call_id = _sleep_reflection(db, (message,), "no prior memory")
+    reflection_event = SleepEngine(db, "owner").get(sleep_id).reflection_event_id
+    assert reflection_event is not None
+    memory = MemoryStore(db).create(
+        "owner",
+        "episodic",
+        "memory born after private input",
+        salience=0.4,
+        confidence=0.6,
+        source_event_ids=(independent_event.event_id,),
+    )
+    MemoryStore(db).revise(
+        memory.memory_id,
+        content="mixed after-window copy",
+        salience=0.7,
+        confidence=0.8,
+        status="active",
+        reason="sleep-derived synthesis",
+        source_event_ids=(reflection_event, independent_event.event_id),
+    )
+    revision_snapshot = MemoryStore(db).revisions(memory.memory_id)
+    erasure = ConversationErasure(db)
+    assert erasure.assess("owner", window["conversation_id"])["reason_code"] == (
+        "multi_source_memory_review_required"
+    )
+    with pytest.raises(ErasureReviewRequired, match="multi_source_memory_review_required"):
+        erasure.request("owner", window["conversation_id"], expected_revision=1, confirmed=True)
+    assert not erasure.root.exists()
+    assert MemoryStore(db).revisions(memory.memory_id) == revision_snapshot
+    assert _reflection_row(db, sleep_id)["plan_hash"] != ERASED_REFLECTION_HASH
+    assert ModelLedger(db).get_call(call_id).response != ERASED_MODEL
+    assert InteractionStore(db).get(message).content == "private original"
+
+
+def _replace_sleep_integration_hash(db: Database, sleep_id: str) -> None:
+    # Model an inconsistent historical copy while keeping the reviewed DDL.
+    with db.transaction() as connection:
+        guard = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE name='prevent_sleep_integration_update'"
+        ).fetchone()[0]
+        connection.execute("DROP TRIGGER prevent_sleep_integration_update")
+        connection.execute(
+            "UPDATE sleep_integrations SET result_hash=? WHERE sleep_id=?", ("0" * 64, sleep_id)
+        )
+        connection.execute(guard)
+
+
+@pytest.mark.parametrize("residual", ["binding", "vector_input", "search_index"])
+def test_sleep_memory_erasure_refuses_inconsistent_completed_backup(
+    tmp_path: Path, residual: str
+) -> None:
+    root = tmp_path / "current"
+    db = Database(root / "noyra.sqlite3")
+    window, message, event = _private_message(db)
+    sleep_id, _, memory_id = _integrated_sleep_memory(db, message, event, "fixture memory")
+    erasure = ConversationErasure(db)
+    erasure.request("owner", window["conversation_id"], expected_revision=1, confirmed=True)
+    result = erasure.run("owner", window["conversation_id"])
+    assert result["status"] == "completed", result
+    if residual == "binding":
+        _replace_sleep_integration_hash(db, sleep_id)
+        error = "sleep memory evidence differs"
+    elif residual == "vector_input":
+        with db.connection() as connection:
+            connection.execute("PRAGMA foreign_keys=OFF")
+            connection.execute(
+                "INSERT INTO memory_embedding_inputs VALUES (?,?)",
+                (memory_id, content_hash("old fixture vector input")),
+            )
+            connection.commit()
+        error = "sleep memory embedding input residual"
+    else:
+        with db.transaction() as connection:
+            connection.execute(
+                "INSERT INTO memory_fts(memory_id,subject_id,content) VALUES (?,'owner',?)",
+                (memory_id, "stale fixture index"),
+            )
+        error = "private erasure index residual"
+    keyring = tmp_path / "keyring.json"
+    BackupKeyring.initialize(keyring)
+    manager = EncryptedBackupManager(root, keyring)
+    backup = tmp_path / "damaged-backup.noyra-backup"
+    manager.create(backup)
+    destination = tmp_path / "restored"
+    with pytest.raises(IntegrityError, match=error):
+        manager.restore(backup, destination)
+    assert not destination.exists()
+    assert not list(tmp_path.glob(".noyra-restore-*"))
 
 
 @pytest.mark.parametrize("archived", [False, True])
@@ -761,14 +3133,17 @@ def test_restore_rejects_unsupported_replay_without_publishing(tmp_path: Path) -
 def test_restore_reconstructs_independent_memory_and_erases_mixed_revisions(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from noyra.core.events import EventStore
-
     current = tmp_path / "current"
     db = Database(current / "noyra.sqlite3")
     IdentityStore(db).ensure("owner", content_hash("owner"))
     with monkeypatch.context() as prior:
         prior.setattr("noyra.core.events.utc_now", lambda: "1999-01-01T00:00:00.000+00:00")
-        independent = EventStore(db).append("owner", "independent", "test", {"fact": "safe"})
+        event_store = EventStore(db)
+        independent = event_store.append("owner", "independent", "test", {"fact": "safe"})
+        additional = tuple(
+            event_store.append("owner", "independent", "test", {"sequence": index}).event_id
+            for index in range(63)
+        )
     memory = MemoryStore(db, clock=lambda: "2000-01-01T00:00:00.000+00:00").create(
         "owner",
         "episodic",
@@ -778,6 +3153,8 @@ def test_restore_reconstructs_independent_memory_and_erases_mixed_revisions(
         source_event_ids=(independent.event_id,),
     )
     window, message, event = _private_message(db)
+    # Both revisions fit the limit, but their combined sources exceed it.
+    later_sources = (*additional, event)
     MemoryStore(db).revise(
         memory.memory_id,
         content="private mixed fact",
@@ -785,7 +3162,30 @@ def test_restore_reconstructs_independent_memory_and_erases_mixed_revisions(
         confidence=0.9,
         status="active",
         reason="private reason",
-        source_event_ids=(independent.event_id, event),
+        source_event_ids=later_sources,
+    )
+    other = ConversationStore(db).create("owner", "independent window")
+    independent_message = InteractionStore(db).receive(
+        "owner",
+        "web",
+        "web-user",
+        "another window's text",
+        conversation_id=other["conversation_id"],
+    )
+    with db.connection() as connection:
+        independent_event = connection.execute(
+            "SELECT event_id FROM events WHERE subject_id='owner' "
+            "AND event_type='interaction_received' "
+            "AND json_extract(payload_json,'$.interaction_id')=?",
+            (independent_message.interaction_id,),
+        ).fetchone()[0]
+    other_memory = MemoryStore(db).create(
+        "owner",
+        "semantic",
+        "unrelated window fact",
+        salience=0.5,
+        confidence=0.7,
+        source_event_ids=(independent_event,),
     )
     keyring = tmp_path / "keyring.json"
     BackupKeyring.initialize(keyring)
@@ -801,13 +3201,140 @@ def test_restore_reconstructs_independent_memory_and_erases_mixed_revisions(
 
     restored = Database(target / "noyra.sqlite3")
     assert InteractionStore(restored).get(message).content == ERASED
-    assert MemoryStore(restored).get(memory.memory_id).content == ERASED
-    assert all(
-        row["content"] == ERASED for row in MemoryStore(restored).revisions(memory.memory_id)
+    store = MemoryStore(restored)
+    assert store.get(memory.memory_id).content == ERASED
+    revisions = store.revisions(memory.memory_id)
+    assert len(revisions) == 3
+    assert all(row["content"] == ERASED for row in revisions)
+    assert revisions[0]["source_event_ids_json"] == canonical_json([independent.event_id])
+    assert revisions[1]["source_event_ids_json"] == canonical_json(later_sources)
+    assert revisions[2]["source_event_ids_json"] == canonical_json(later_sources)
+    assert store.get(other_memory.memory_id) == other_memory
+    assert InteractionStore(restored).get(independent_message.interaction_id) == independent_message
+    remaining = store.search("owner")
+    assert {item.content for item in remaining} == {"independent fact", "unrelated window fact"}
+    with restored.connection() as connection:
+        assert not connection.execute(
+            "SELECT 1 FROM memory_fts WHERE memory_id=?", (memory.memory_id,)
+        ).fetchone()
+    assert MindEngine(restored).verify_integrity("owner")["memories"] == 3
+
+
+@pytest.mark.parametrize("case", ["legacy", "stale_index", "receipt_count_mismatch"])
+def test_restore_rechecks_completed_memory_erasure_receipts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    current = tmp_path / "current"
+    db = Database(current / "noyra.sqlite3")
+    window, _, event = _private_message(db)
+    memory = MemoryStore(db).create(
+        "owner",
+        "semantic",
+        "private text",
+        salience=0.5,
+        confidence=0.7,
+        source_event_ids=(event,),
     )
-    remaining = MemoryStore(restored).search("owner", query="independent")
-    assert len(remaining) == 1 and remaining[0].content == "independent fact"
-    assert MindEngine(restored).verify_integrity("owner")["memories"] == 2
+    erasure = ConversationErasure(db)
+    erasure.request("owner", window["conversation_id"], expected_revision=1, confirmed=True)
+    erase_memories = RecoveryErasure._erase_affected_memories
+
+    def erase_with_older_counts(self: RecoveryErasure, *args: Any) -> dict[str, int]:
+        counts = erase_memories(self, *args)
+        if case == "legacy":
+            del counts["reconstructed_memories"]
+        elif case == "receipt_count_mismatch":
+            counts["exclusive_memories"] += 1
+        return counts
+
+    with monkeypatch.context() as legacy:
+        legacy.setattr(RecoveryErasure, "_erase_affected_memories", erase_with_older_counts)
+        assert erasure.run("owner", window["conversation_id"])["status"] == "completed"
+    if case == "stale_index":
+        with db.transaction() as connection:
+            connection.execute(
+                "INSERT INTO memory_fts(memory_id,subject_id,content) VALUES(?,?,?)",
+                (memory.memory_id, "owner", "stale completed-job text"),
+            )
+    keyring = tmp_path / "keyring.json"
+    BackupKeyring.initialize(keyring)
+    manager = EncryptedBackupManager(current, keyring)
+    backup = tmp_path / "after-erasure.noyra-backup"
+    manager.create(backup)
+    target = tmp_path / "restored"
+    if case != "legacy":
+        reason = "private erasure index residual" if case == "stale_index" else "receipt counts"
+        with pytest.raises(IntegrityError, match=reason):
+            manager.restore(backup, target)
+        assert not target.exists()
+        assert not list(tmp_path.glob(".noyra-restore-*"))
+    else:
+        assert manager.restore(backup, target) == target
+        copy = Database(target / "noyra.sqlite3")
+        assert MemoryStore(copy).get(memory.memory_id).content == ERASED
+        assert MemoryStore(copy).search("owner") == []
+
+
+@pytest.mark.parametrize("residual", ["prior_revision", "search_index"])
+def test_erasure_rolls_back_if_any_memory_copy_remains(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, residual: str
+) -> None:
+    db = Database(tmp_path / "noyra.sqlite3")
+    IdentityStore(db).ensure("owner", content_hash("owner"))
+    with monkeypatch.context() as prior:
+        prior.setattr("noyra.core.events.utc_now", lambda: "1999-01-01T00:00:00.000+00:00")
+        evidence = EventStore(db).append("owner", "independent", "test", {})
+    memory = MemoryStore(db, clock=lambda: "2000-01-01T00:00:00.000+00:00").create(
+        "owner",
+        "semantic",
+        "independent original",
+        salience=0.5,
+        confidence=0.7,
+        source_event_ids=(evidence.event_id,),
+    )
+    window, message_id, private_event = _private_message(db)
+    store = MemoryStore(db)
+    store.revise(
+        memory.memory_id,
+        content="mixed private history",
+        salience=0.4,
+        confidence=0.6,
+        status="active",
+        reason="fixture revision",
+        source_event_ids=(private_event,),
+    )
+    if residual == "prior_revision":
+        # Simulate an update that reports no exception but misses a revision
+        # that has no direct target event in its source list.
+        with db.transaction() as connection:
+            connection.execute(
+                "CREATE TRIGGER test_skip_memory_redaction BEFORE UPDATE ON memory_revisions "
+                "WHEN OLD.revision_number=1 BEGIN SELECT RAISE(IGNORE); END"
+            )
+    else:
+        verify = RecoveryErasure._verify
+
+        def verify_with_stale_index(connection: sqlite3.Connection, *args: Any) -> None:
+            connection.execute(
+                "INSERT INTO memory_fts(memory_id,subject_id,content) VALUES(?,?,?)",
+                (memory.memory_id, "owner", "stale index text"),
+            )
+            verify(connection, *args)
+
+        monkeypatch.setattr(RecoveryErasure, "_verify", staticmethod(verify_with_stale_index))
+
+    erasure = ConversationErasure(db)
+    erasure.request("owner", window["conversation_id"], expected_revision=1, confirmed=True)
+    current = store.get(memory.memory_id)
+    history = store.revisions(memory.memory_id)
+    result = erasure.run("owner", window["conversation_id"])
+    assert result["status"] == "failed" and result["error_code"] == "erasure_storage_error"
+    assert store.get(memory.memory_id) == current
+    assert store.revisions(memory.memory_id) == history
+    assert InteractionStore(db).get(message_id).content == "private original"
+    with db.connection() as connection:
+        assert not connection.execute("SELECT 1 FROM private_erasure_receipts").fetchone()
+        assert connection.execute("SELECT COUNT(*) FROM memories").fetchone()[0] == 1
 
 
 @pytest.mark.parametrize("invalid", ["empty", "malformed", "wrong_filename", "large", "hardlink"])

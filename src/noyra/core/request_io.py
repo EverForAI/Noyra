@@ -6,7 +6,7 @@ import io
 import socket
 from typing import Any
 
-from .deadline import remaining_seconds
+from .deadline import monotonic_time, remaining_seconds
 
 
 class RequestHeadLimitError(OSError):
@@ -89,6 +89,26 @@ class DeadlineRequestReader(io.RawIOBase):
         remaining_seconds(self._timeout)
         buffer[: len(data)] = data
         return len(data)
+
+    def discard_pending(self, *, max_bytes: int, timeout_seconds: float) -> None:
+        """Discard a bounded socket tail after rejecting an oversized head.
+
+        Unread request bytes can cause TCP to reset and discard a response
+        already sent to the client. The discarded bytes never reach the parser.
+        """
+        deadline = monotonic_time() + timeout_seconds
+        while max_bytes > 0:
+            remaining_time = deadline - monotonic_time()
+            if remaining_time <= 0:
+                return
+            try:
+                self._connection.settimeout(remaining_time)
+                data = self._reader.read1(min(io.DEFAULT_BUFFER_SIZE, max_bytes))
+            except OSError:
+                return
+            if not data:
+                return
+            max_bytes -= len(data)
 
     def close(self) -> None:
         try:

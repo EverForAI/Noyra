@@ -104,7 +104,8 @@ def test_schema_118_backfills_only_existing_explicit_peer_bindings(
                     (now, key_id),
                 )
 
-    upgraded = Database(path, strict_schema_contract=True)
+    with patch.object(database_module, "CURRENT_SCHEMA_VERSION", 118):
+        upgraded = Database(path, strict_schema_contract=True)
     with upgraded.read_transaction() as connection:
         version = connection.execute(
             "SELECT value FROM schema_meta WHERE key='schema_version'"

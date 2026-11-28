@@ -19,7 +19,18 @@ from noyra.wallet import (
     WalletSignerError,
     WalletStore,
 )
+from noyra.wallet import execution as wallet_execution
 from test_wallet_execution import fixture
+
+
+@pytest.fixture(autouse=True)
+def custom_mock_signers_are_simulation_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    classify = wallet_execution.wallet_signer_requires_evidence
+
+    def explicit_simulation(signer: Any) -> bool:
+        return False if isinstance(signer, MockSigner) else classify(signer)
+
+    monkeypatch.setattr(wallet_execution, "wallet_signer_requires_evidence", explicit_simulation)
 
 
 def test_disabled_policy_blocks_existing_reserved_order(tmp_path: Path) -> None:

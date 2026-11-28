@@ -55,6 +55,7 @@ with publication_upgrade_runtime(pair):
 """
 
 
+@pytest.mark.parametrize("control", [116, 124], indirect=True)
 @pytest.mark.parametrize("mode", ("read", "before_acceptance"))
 def test_new_process_resumes_the_old_intent_and_interrupted_upgrade_recovery_is_idempotent(
     recoverable: RecoverablePublication, mode: str

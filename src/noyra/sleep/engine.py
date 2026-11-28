@@ -10,14 +10,14 @@ from noyra.core.errors import IntegrityError, NotFoundError
 from noyra.core.events import EventStore
 from noyra.core.identity import IdentityStore
 from noyra.core.lifecycle import LifecycleManager
+from noyra.core.private_sources import private_call_withdrawn, private_event_inputs
 from noyra.core.snapshots import SnapshotStore
 from noyra.core.types import canonical_json, content_hash, new_id, utc_now
 from noyra.mind.belief import BeliefStore
-from noyra.mind.goal import GoalStore
 from noyra.mind.memory import MemoryStore
 from noyra.mind.validation import validate_causal_source_ids, validate_event_ids
 
-from .errors import SleepStateConflictError
+from .errors import SleepReflectionSourceWithdrawn, SleepStateConflictError
 from .fatigue import FatigueTracker
 from .types import SleepReflectionPlan, SleepRunRecord
 
@@ -64,7 +64,6 @@ class SleepEngine:
         self.fatigue = FatigueTracker(database, clock=self.clock)
         self.memories = MemoryStore(database)
         self.beliefs = BeliefStore(database)
-        self.goals = GoalStore(database)
         self.snapshots = SnapshotStore(database)
         self.identities = IdentityStore(database)
 
@@ -199,6 +198,16 @@ class SleepEngine:
                     raise SleepStateConflictError("sleep already has a different reflection")
                 return self._from_row(row)
 
+            # The legacy shape is retained for historical replay only.
+            if plan.goal_revisions:
+                raise SleepStateConflictError("sleep reflection cannot revise goals")
+
+            self._check_reflection_sources(connection, sleep_id, plan)
+            # Preserve the selected call, not every call sharing the run's purpose.
+            # Keep this outside the persisted plan/hash and the event's causal edges.
+            model_link = (
+                {} if plan._model_call_id is None else {"model_call_id": plan._model_call_id}
+            )
             event = self.events._append_connection(
                 connection,
                 self.subject_id,
@@ -211,6 +220,7 @@ class SleepEngine:
                     "contradictions": len(plan.contradictions),
                     "prediction_errors": len(plan.prediction_errors),
                     "unresolved_questions": len(plan.unresolved_questions),
+                    **model_link,
                 },
                 privacy_level="private",
                 causal_parent_ids=(),
@@ -241,9 +251,6 @@ class SleepEngine:
                 ),
             )
             self._apply_memories(connection, sleep_id, event.event_id, plan, now)
-            # Project managers may add richer sleep assessments; this local
-            # snapshot is only a fallback and never calls a model.
-            self._apply_goals(connection, sleep_id, event.event_id, plan, now)
             self._apply_beliefs(connection, sleep_id, event.event_id, plan, now)
             self._apply_retry_blocks(connection, sleep_id, plan, now)
             self._apply_personality_candidates(connection, sleep_id, plan, now)
@@ -269,6 +276,35 @@ class SleepEngine:
                 connection, self.subject_id, f"sleep_reflection:{sleep_id}", now=now
             )
             return self._load_connection(connection, sleep_id)
+
+    def _check_reflection_sources(
+        self, connection: Any, sleep_id: str, plan: SleepReflectionPlan
+    ) -> None:
+        if plan._model_call_id is not None:
+            call = connection.execute(
+                "SELECT status,error_code FROM model_calls "
+                "WHERE call_id=? AND subject_id=? AND purpose=?",
+                (plan._model_call_id, self.subject_id, f"sleep_reflection:{sleep_id}"),
+            ).fetchone()
+            if call is None or call["status"] != "succeeded":
+                raise SleepStateConflictError("reflection model call does not match this run")
+            if call["error_code"] == "private_content_erased" or private_call_withdrawn(
+                connection, self.subject_id, plan._model_call_id
+            ):
+                raise SleepReflectionSourceWithdrawn("reflection model input was withdrawn")
+        evidence = {event_id for item in plan.memories for event_id in item.source_event_ids}
+        for belief in plan.belief_revisions:
+            evidence.update(belief.supporting_event_ids)
+            evidence.update(belief.counter_event_ids)
+        for candidate in plan.personality_candidates:
+            evidence.update(candidate.evidence_ids)
+        if any(
+            withdrawn
+            for _, withdrawn in private_event_inputs(
+                connection, self.subject_id, tuple(evidence)
+            ).values()
+        ):
+            raise SleepReflectionSourceWithdrawn("reflection evidence was withdrawn")
 
     def enter_deep_sleep(
         self, sleep_id: str, reason: str = "reflection committed"
@@ -494,8 +530,8 @@ class SleepEngine:
         plan: SleepReflectionPlan,
         now: str,
     ) -> None:
+        # The integration receipt records the operation alongside the cited evidence.
         for item in plan.memories:
-            sources = tuple(dict.fromkeys((*item.source_event_ids, reflection_event_id)))
             record = self.memories._create_connection(
                 connection,
                 self.subject_id,
@@ -503,7 +539,7 @@ class SleepEngine:
                 item.content,
                 salience=item.salience,
                 confidence=item.confidence,
-                source_event_ids=sources,
+                source_event_ids=item.source_event_ids,
                 privacy_level="private",
                 reason="sleep consolidation",
             )
@@ -513,47 +549,8 @@ class SleepEngine:
                 "memory",
                 record.memory_id,
                 "created",
-                sources,
+                (*item.source_event_ids, reflection_event_id),
                 content_hash(record.__dict__),
-                now,
-            )
-
-    def _apply_goals(
-        self,
-        connection: Any,
-        sleep_id: str,
-        reflection_event_id: str,
-        plan: SleepReflectionPlan,
-        now: str,
-    ) -> None:
-        seen: set[str] = set()
-        for item in plan.goal_revisions:
-            if item.goal_id in seen:
-                raise SleepStateConflictError("a sleep plan cannot revise one goal twice")
-            seen.add(item.goal_id)
-            current = self.goals._load_connection(connection, item.goal_id)
-            if current.subject_id != self.subject_id:
-                raise SleepStateConflictError("sleep goal belongs to another subject")
-            revised = self.goals._revise_connection(
-                connection,
-                item.goal_id,
-                status=item.status,
-                priority=item.priority,
-                commitment=item.commitment,
-                progress=item.progress,
-                emotional_pressure=item.emotional_pressure,
-                reason=item.reason,
-                causal_source_ids=(reflection_event_id,),
-                expected_revision=current.current_revision,
-            )
-            self._integration(
-                connection,
-                sleep_id,
-                "goal",
-                revised.goal_id,
-                "revised",
-                (reflection_event_id,),
-                content_hash(revised.__dict__),
                 now,
             )
 
@@ -573,14 +570,13 @@ class SleepEngine:
             current = self.beliefs._load_connection(connection, item.belief_id)
             if current.subject_id != self.subject_id:
                 raise SleepStateConflictError("sleep belief belongs to another subject")
-            supporting = tuple(dict.fromkeys((*item.supporting_event_ids, reflection_event_id)))
             revised = self.beliefs._revise_connection(
                 connection,
                 item.belief_id,
                 proposition=item.proposition,
                 confidence=item.confidence,
                 status=item.status,
-                supporting_event_ids=supporting,
+                supporting_event_ids=item.supporting_event_ids,
                 counter_event_ids=item.counter_event_ids,
                 reason=item.reason,
                 expected_revision=current.current_revision,
@@ -591,7 +587,7 @@ class SleepEngine:
                 "belief",
                 revised.belief_id,
                 "revised",
-                (*supporting, *item.counter_event_ids),
+                (*item.supporting_event_ids, *item.counter_event_ids, reflection_event_id),
                 content_hash(revised.__dict__),
                 now,
             )

@@ -37,9 +37,11 @@ def wallet_case(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
     grant = grant_local_wallet(case.database, case.task, address, actor="operator")
     for name, value in {
         "NOYRA_WALLET_MODE": "local",
+        "NOYRA_PROFILE": "test",
+        "NOYRA_WALLET_TESTNET_ENABLED": "true",
         "NOYRA_WALLET_KEYSTORE_PATH": str(keystore),
         "NOYRA_WALLET_PASSWORD_FILE": str(password),
-        "NOYRA_WALLET_RPC_URLS_JSON": '{"1":"https://rpc.example.com/synthetic-rpc-secret"}',
+        "NOYRA_WALLET_RPC_URLS_JSON": '{"11155111":"https://rpc.example.com/synthetic-rpc-secret"}',
     }.items():
         monkeypatch.setenv(name, value)
     recipient = case.recipient.public_key().public_bytes_raw()
@@ -128,7 +130,7 @@ def test_export_never_stages_a_plaintext_wallet_tar_or_rpc_copy(
         assert connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
     assert (restored.parent / "migration-wallet/password").read_text() == PASSWORD
     assert json.loads((restored.parent / "migration-wallet/rpc.json").read_text()) == {
-        "1": "https://rpc.example.com/synthetic-rpc-secret"
+        "11155111": "https://rpc.example.com/synthetic-rpc-secret"
     }
 
 

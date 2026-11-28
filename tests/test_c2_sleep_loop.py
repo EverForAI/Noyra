@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import UTC, datetime, timedelta, tzinfo
 from unittest.mock import AsyncMock
 
@@ -9,20 +10,30 @@ from pydantic import SecretStr
 
 from noyra.autonomy import AutonomyLoop, LoopConfig
 from noyra.cognition import CognitionSettings, SleepReflectionCognition
-from noyra.core import SubjectKernel
+from noyra.core import EventStore, SubjectKernel
 from noyra.core.admission import OperationInvalidated
 from noyra.core.errors import IntegrityError, RuntimeOwnershipError
+from noyra.core.private_sources import private_input_scope
 from noyra.core.scheduling_clock import CooldownClock
 from noyra.core.types import content_hash
+from noyra.interaction import InteractionStore
+from noyra.interaction.conversations import ConversationStore
+from noyra.mind import BeliefStore, MemoryStore
 from noyra.model import (
+    BudgetLimits,
     CognitiveResourceGroupInput,
     CognitiveResourceStore,
     FakeProvider,
+    ModelGateway,
+    ModelLedger,
     ModelMessage,
+    ModelPricing,
     ModelUsage,
     ProviderResponse,
     RoutedModelGateway,
 )
+from noyra.model.request_identity import business_request_key
+from noyra.model.types import CompletionRequest
 from noyra.sleep import SleepIntegrity, SleepReflectionPlan, SleepRunRecord
 from test_c2_sleep_recovery import at_phase
 from test_c2_sleep_recovery import kernel as kernel
@@ -109,6 +120,65 @@ async def test_sleep_advances_after_restart_with_ordinary_admission_closed(
         lease = reopened.admission.begin("ordinary-work")
         reopened.admission.finish(lease)
         SleepIntegrity(reopened.database).verify(subject)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["prepared", "executing", "unknown"])
+async def test_fenced_legacy_reflection_call_allows_sleep_to_finish(
+    kernel: SubjectKernel,
+    status: str,
+) -> None:
+    _, sleep_id = at_phase(kernel, "reflective_sleep")
+    database, subject = kernel.database, kernel.subject_id
+    purpose = f"sleep_reflection:{sleep_id}"
+    provider = FakeProvider([])
+    ledger = ModelLedger(database)
+    call, _ = ledger.prepare_call(
+        subject,
+        provider.name,
+        "legacy-model",
+        purpose,
+        content_hash("legacy context"),
+        business_request_key(database, subject, purpose),
+    )
+    if status != "prepared":
+        attempt = ledger.authorize_attempt(
+            call.call_id,
+            BudgetLimits(10, 1_000, 1_000, 1_000),
+            reserved_input_tokens=1,
+            reserved_output_tokens=1,
+            reserved_cost_microusd=1,
+        )
+        ledger.start_attempt(attempt.attempt_id)
+        if status == "unknown":
+            ledger.finish_attempt(attempt.attempt_id, "unknown", usage=None, cost_microusd=None)
+            ledger.finish_call(call.call_id, "unknown")
+    call = ledger.get_call(call.call_id)
+    assert call.status == status
+    attempts = ledger.attempts(call.call_id)
+    resources = CognitiveResourceStore(database, database.path.parent / "model-secrets")
+    gateway = RoutedModelGateway(database, subject, resources, provider_factory=lambda _: provider)
+    cognition = SleepReflectionCognition(
+        database,
+        subject,
+        gateway,
+        CognitionSettings(enabled=False),
+    )
+    loop = AutonomyLoop(kernel, reflection_hook=cognition.propose)
+    for action in ("reflection_committed", "deep_sleep_entered", "wake_started", "wake_completed"):
+        assert (await loop.tick()).action == action
+    assert loop.sleep.get(sleep_id).status == "complete"
+    assert not provider.requests
+    assert ledger.get_call(call.call_id) == call
+    assert ledger.attempts(call.call_id) == attempts
+    with database.read_transaction() as connection:
+        assert (
+            connection.execute(
+                "SELECT count(*) FROM model_calls WHERE purpose=?", (purpose,)
+            ).fetchone()[0]
+            == 1
+        )
+    SleepIntegrity(database).verify(subject)
 
 
 @pytest.mark.asyncio
@@ -383,3 +453,178 @@ async def test_each_persistent_stage_write_failure_has_a_bounded_exit(
     assert loop.sleep.get(identifier).status == "failed"
     assert kernel.lifecycle.current().state == "paused"
     assert kernel.admission.active_operations == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "withdrawal",
+    ["before_context", "before_recovery", "during_provider", "before_commit", "derived_only"],
+)
+async def test_private_reflection_withdrawal_continues_to_wake(
+    kernel: SubjectKernel, withdrawal: str
+) -> None:
+    subject = kernel.subject_id
+    db = kernel.database
+    events = EventStore(db)
+    window = ConversationStore(db).create(subject, "Private test window")
+    private_message = InteractionStore(db).receive(
+        subject,
+        "web",
+        "web-user",
+        "private-raw-test-marker",
+        conversation_id=window["conversation_id"],
+    )
+    with db.read_transaction() as connection:
+        private_event = connection.execute(
+            "SELECT event_id FROM events WHERE event_type='interaction_received' "
+            "AND json_extract(payload_json,'$.interaction_id')=?",
+            (private_message.interaction_id,),
+        ).fetchone()[0]
+    if withdrawal == "derived_only":
+        previous, previous_id = at_phase(kernel, "deep_sleep")
+        previous.wake(previous_id, "Synthetic wake")
+        previous.complete_wake(previous_id)
+    public_event = events.append(subject, "experience", "test", {}).event_id
+    memories = MemoryStore(db)
+    prior_memory = memories.create(
+        subject,
+        "reflection",
+        "private-memory-test-marker",
+        salience=0.8,
+        confidence=0.6,
+        source_event_ids=(public_event, private_event),
+    )
+    beliefs = BeliefStore(db)
+    prior_belief = beliefs.create(
+        subject,
+        "private-belief-test-marker",
+        confidence=0.5,
+        scope="local test",
+        supporting_event_ids=(public_event,),
+    )
+    beliefs.revise(
+        prior_belief.belief_id,
+        proposition=prior_belief.proposition,
+        confidence=0.4,
+        status="qualified",
+        supporting_event_ids=(public_event,),
+        counter_event_ids=(private_event,),
+        reason="review",
+    )
+    engine, sleep_id = at_phase(kernel, "reflective_sleep")
+    output = {
+        "summary": "new-model-summary-test-marker",
+        "memories": [
+            {
+                "content": "new-model-memory-test-marker",
+                "salience": 0.7,
+                "confidence": 0.6,
+                "source_event_ids": [public_event],
+            }
+        ],
+        "public_diary_candidate": "new-model-diary-test-marker",
+    }
+
+    class WithdrawingProvider(FakeProvider):
+        async def complete(self, request: CompletionRequest) -> ProviderResponse:
+            if withdrawal == "during_provider":
+                # Simulate another operation changing the durable authorization.
+                with private_input_scope(()):
+                    mark_withdrawn()
+            return await super().complete(request)
+
+    provider = WithdrawingProvider(
+        [ProviderResponse(content=json.dumps(output), usage=ModelUsage(50, 50))]
+    )
+    ledger = ModelLedger(db)
+    gateway = ModelGateway(
+        provider,
+        ledger,
+        model="mock",
+        limits=BudgetLimits(20, 500_000, 100_000, 5_000_000),
+        pricing=ModelPricing(),
+    )
+    settings = CognitionSettings(enabled=False, max_sleep_context_chars=60_000)
+    cognition = SleepReflectionCognition(db, subject, gateway, settings)
+
+    def mark_withdrawn() -> None:
+        # Represent the persisted withdrawal boundary without enabling erasure.
+        with db.transaction() as connection:
+            connection.execute(
+                "UPDATE private_conversations SET status='deleting' WHERE conversation_id=?",
+                (window["conversation_id"],),
+            )
+
+    if withdrawal == "before_context":
+        mark_withdrawn()
+    elif withdrawal == "before_recovery":
+        proposal = await cognition.propose(engine.get(sleep_id))
+        assert proposal.summary == output["summary"]
+        mark_withdrawn()
+        cognition = SleepReflectionCognition(db, subject, gateway, settings)
+
+    async def reflect(run: SleepRunRecord) -> SleepReflectionPlan:
+        plan = await cognition.propose(run)
+        if withdrawal in {"before_commit", "derived_only"}:
+            assert plan.summary == output["summary"]
+            mark_withdrawn()
+        return plan
+
+    loop = AutonomyLoop(
+        kernel, config=LoopConfig(max_consecutive_failures=1), reflection_hook=reflect
+    )
+    for expected in (
+        "reflection_committed",
+        "deep_sleep_entered",
+        "wake_started",
+        "wake_completed",
+    ):
+        assert (await loop.tick()).action == expected
+    assert kernel.lifecycle.current().state == "active"
+    assert loop.sleep.get(sleep_id).status == "complete"
+    assert len(provider.requests) == 1
+    context = provider.requests[0].messages[-1].content
+    raw_fragments = (private_message.interaction_id, private_event, "private-raw-test-marker")
+    derived_fragments = (
+        prior_memory.memory_id,
+        prior_belief.belief_id,
+        "private-memory-test-marker",
+        "private-belief-test-marker",
+    )
+    with db.read_transaction() as connection:
+        row = connection.execute(
+            "SELECT plan_json FROM sleep_reflections WHERE sleep_id=?", (sleep_id,)
+        ).fetchone()
+        plan = SleepReflectionPlan.model_validate_json(row[0])
+        source_rows = connection.execute(
+            "SELECT s.interaction_id FROM private_model_sources s JOIN model_calls c "
+            "ON c.call_id=s.call_id WHERE c.purpose=?",
+            (f"sleep_reflection:{sleep_id}",),
+        ).fetchall()
+        state = connection.execute(
+            "SELECT COUNT(*) FROM events WHERE event_type='sleep_stage_failed'"
+        ).fetchone()[0]
+        assert not state
+        if withdrawal == "during_provider":
+            assert (
+                connection.execute(
+                    "SELECT error_code FROM model_calls WHERE purpose=?",
+                    (f"sleep_reflection:{sleep_id}",),
+                ).fetchone()[0]
+                == "private_content_erased"
+            )
+    if withdrawal == "before_context":
+        assert all(fragment not in context for fragment in (*raw_fragments, *derived_fragments))
+        assert not source_rows
+        assert plan.summary == output["summary"]
+        assert len(memories.search(subject)) == 2
+    else:
+        assert all(fragment in context for fragment in derived_fragments)
+        if withdrawal == "derived_only":
+            assert all(fragment not in context for fragment in raw_fragments)
+        else:
+            assert all(fragment in context for fragment in raw_fragments)
+        assert [row[0] for row in source_rows] == [private_message.interaction_id]
+        assert plan == SleepReflectionPlan.after_source_withdrawal()
+        assert len(memories.search(subject)) == 1
+    SleepIntegrity(db).verify(subject)

@@ -17,14 +17,11 @@ from noyra.model.ledger import ModelLedger
 
 
 def test_schema85_upgrade_preserves_messages_and_installs_source_contract(tmp_path: Path) -> None:
-    db = Database(tmp_path / "migration.sqlite3")
-    IdentityStore(db).ensure("owner", content_hash("owner"))
-    message = InteractionStore(db).receive("owner", "web", "web-user", "original")
-    with db.transaction() as connection:
-        connection.execute("DROP TABLE private_model_sources")
-        connection.execute("ALTER TABLE cognitive_resource_groups DROP COLUMN reasoning_effort")
-        connection.execute("UPDATE schema_meta SET value='85' WHERE key='schema_version'")
-    migrated = Database(db.path)
+    with patch("noyra.core.database.CURRENT_SCHEMA_VERSION", 85):
+        db = Database(tmp_path / "migration.sqlite3", strict_schema_contract=True)
+        IdentityStore(db).ensure("owner", content_hash("owner"))
+        message = InteractionStore(db).receive("owner", "web", "web-user", "original")
+    migrated = Database(db.path, strict_schema_contract=True)
     assert InteractionStore(migrated).get(message.interaction_id).content == "original"
     with migrated.connection() as connection:
         assert (

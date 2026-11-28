@@ -10,5 +10,9 @@ class SleepReflectionDeferred(SleepError):
     """A temporarily unavailable model can wait without failing the sleep stage."""
 
 
+class SleepReflectionSourceWithdrawn(SleepError):
+    """A known private source became unavailable before the reflection commit."""
+
+
 class FatigueStateError(SleepError):
     """Fatigue state is missing or inconsistent."""

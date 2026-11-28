@@ -123,7 +123,7 @@ def recoverable(
     yield action
 
 
-@pytest.mark.parametrize("control", [116, 117], indirect=True)
+@pytest.mark.parametrize("control", [116, 117, 124], indirect=True)
 def test_real_existing_request_recovers_without_normalizing_live_or_frozen_source(
     recoverable: RecoverablePublication,
 ) -> None:

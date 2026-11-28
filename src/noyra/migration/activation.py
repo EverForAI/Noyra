@@ -737,7 +737,11 @@ class TargetRuntimeActivator:
             if (staging / "migration-wallet").exists():
                 raise TargetActivationError("unexpected_local_wallet_material")
             return None
+        from noyra.wallet.config import require_wallet_testnet_opt_in
+
         from .wallet_material import verify_local_wallet
+
+        require_wallet_testnet_opt_in()
 
         record = _read_json(
             self.agent_root / "bindings" / f"{request['task_id']}.json",
@@ -787,15 +791,19 @@ class TargetRuntimeActivator:
         if request["wallet_mode"] == "disabled":
             runtime_env += "NOYRA_WALLET_MODE=disabled\n"
         if wallet_directory is not None:
-            from noyra.wallet.config import _parse_rpc_urls
+            from noyra.wallet.config import local_testnet_rpc_urls
 
-            rpc = _parse_rpc_urls((wallet_directory / "rpc.json").read_text(encoding="utf-8"))
+            rpc = local_testnet_rpc_urls(
+                (wallet_directory / "rpc.json").read_text(encoding="utf-8")
+            )
             rpc_text = canonical_json({str(key): value for key, value in rpc.items()})
             rpc_text = rpc_text.replace("\\", "\\\\").replace('"', '\\"')
             # EnvironmentFile contents have no variable/specifier expansion.
             wallet_path = str(wallet_directory).replace("\\", "\\\\").replace('"', '\\"')
             runtime_env += (
                 "NOYRA_WALLET_MODE=local\n"
+                "NOYRA_WALLET_TESTNET_ENABLED=true\n"
+                "NOYRA_WALLET_SIGNER_TIMEOUT_SECONDS=\n"
                 f'NOYRA_WALLET_KEYSTORE_PATH="{wallet_path}/wallet.json"\n'
                 f'NOYRA_WALLET_PASSWORD_FILE="{wallet_path}/password"\n'
                 f'NOYRA_WALLET_RPC_URLS_JSON="{rpc_text}"\n'

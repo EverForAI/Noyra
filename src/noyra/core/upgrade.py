@@ -14,7 +14,9 @@ from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
+from noyra.core.deadline import operation_deadline
 from noyra.core.errors import RuntimeOwnershipError
 from noyra.core.locking import ProcessLock
 from noyra.core.redaction import redact_text
@@ -192,19 +194,56 @@ class UpgradeManager:
                 raise UpgradeError("upgrade_remote_connect_failed") from None
             except (OSError, ValueError, KeyError):
                 raise UpgradeError("upgrade_unavailable") from None
-        url = (
-            f"https://api.github.com/repos/{self.github_owner}/{self.github_repo}"
-            f"/commits/{self.github_branch}"
-        )
         try:
-            raw = read_release_metadata(url, maximum=65_536, timeout=8)
-            return json.loads(raw)
+            # The branch-facing /commits/{ref} endpoint includes a per-file
+            # change list. Large merge commits can exceed our deliberate body
+            # limit even though version checks need only SHA/date/title. Resolve
+            # the branch to a fixed commit, then read its compact Git commit
+            # object, which has no changed-file list. Both requests share the
+            # same bounded deadline and each response remains tightly capped.
+            with operation_deadline(8):
+                base = f"https://api.github.com/repos/{self.github_owner}/{self.github_repo}"
+                branch = quote(self.github_branch, safe="")
+                reference = self._github_json(base + f"/git/ref/heads/{branch}", maximum=16_384)
+                if (
+                    not isinstance(reference, dict)
+                    or reference.get("ref") != f"refs/heads/{self.github_branch}"
+                    or not isinstance(reference.get("object"), dict)
+                    or reference["object"].get("type") != "commit"
+                ):
+                    raise ValueError("upgrade metadata reference is invalid")
+                sha = reference["object"].get("sha")
+                if not isinstance(sha, str) or not _SHA.fullmatch(sha):
+                    raise ValueError("upgrade metadata reference is invalid")
+                commit = self._github_json(base + f"/git/commits/{sha}", maximum=32_768)
+                if (
+                    not isinstance(commit, dict)
+                    or commit.get("sha") != sha
+                    or not isinstance(commit.get("committer"), dict)
+                    or not isinstance(commit["committer"].get("date"), str)
+                    or not isinstance(commit.get("message"), str)
+                ):
+                    raise ValueError("upgrade metadata commit is invalid")
+                title_lines = commit["message"].splitlines()
+                title = title_lines[0] if title_lines else "No commit message"
+                return {
+                    "sha": sha,
+                    "committed_at": commit["committer"]["date"],
+                    "title": title,
+                }
         except urllib.error.HTTPError as error:
             raise UpgradeError(self._remote_http_error(error)) from None
         except (urllib.error.URLError, TimeoutError):
             raise UpgradeError("upgrade_remote_connect_failed") from None
         except (OSError, ValueError):
             raise UpgradeError("upgrade_unavailable") from None
+
+    @staticmethod
+    def _github_json(url: str, *, maximum: int) -> Any:
+        if not url.startswith("https://api.github.com/repos/"):
+            raise ValueError("invalid release metadata URL")
+        raw = read_release_metadata(url, maximum=maximum, timeout=8)
+        return json.loads(raw)
 
     def _remote_http_error(self, error: urllib.error.HTTPError) -> str:
         if (

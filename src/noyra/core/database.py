@@ -3817,6 +3817,16 @@ END;
                         from .workflow_publication_upgrade import validate_publication_upgrade
 
                         validate_publication_upgrade(connection)
+                    if target_version == 125:
+                        # Keep legacy migration replay idempotent. Existing declarations
+                        # are never inferred or backfilled from graph edges.
+                        entity_columns = {
+                            row["name"] for row in connection.execute("PRAGMA table_info(entities)")
+                        }
+                        if "creation_evidence_json" not in entity_columns:
+                            connection.execute(
+                                "ALTER TABLE entities ADD COLUMN creation_evidence_json TEXT"
+                            )
                     self._execute_sql_script(connection, migration)
                     self._set_schema_version(connection, target_version)
                     connection.commit()

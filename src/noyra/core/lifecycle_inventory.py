@@ -66,7 +66,9 @@ _GROUPS: dict[str, str] = {
     persistent_features runtime_state schema_meta subject_identity
     """,
     "memory": """
-    memories memory_accesses memory_block_revisions memory_blocks
+    memories memory_accesses memory_block_revision_event_coverage
+    memory_block_revision_event_sources memory_block_revision_lineage
+    memory_block_revision_sources memory_block_revisions memory_blocks
     memory_consolidation_members memory_consolidation_runs memory_embedding_inputs
     memory_embeddings memory_fts memory_fts_config memory_fts_content memory_fts_data
     memory_fts_docsize memory_fts_idx memory_integration_revisions memory_integrations

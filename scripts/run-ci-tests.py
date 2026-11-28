@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from io import TextIOWrapper
 from pathlib import Path
 from typing import TextIO
 
@@ -120,8 +121,8 @@ def main(argv: list[str] | None = None) -> int:
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.wait()
-        for log in logs:
-            log.close()
+        for worker_log in logs:
+            worker_log.close()
     for index, code in enumerate(codes):
         print(f"\n=== CI shard {index}: exit {code} ===", flush=True)
         print((folder / f"shard-{index}.log").read_text(encoding="utf-8", errors="replace"))
@@ -160,4 +161,8 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    # Preserve the console encoding while keeping shard diagnostics printable.
+    # The UTF-8 shard files retain the original text.
+    if isinstance(sys.stdout, TextIOWrapper):
+        sys.stdout.reconfigure(errors="backslashreplace")
     raise SystemExit(main())

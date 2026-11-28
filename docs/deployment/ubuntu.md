@@ -494,6 +494,11 @@ incomplete requests close the connection; bounded async work is cancelled and it
 existing ownership/drain protection remains in effect. Choose a budget that permits
 legitimate uploads, and keep an equivalent or shorter timeout at the reverse proxy.
 
+Development-channel version checks resolve the configured branch to an immutable Git commit
+SHA and read only that commit's date/title metadata; they do not download the per-file patch list.
+The reference and commit responses retain separate small body limits within one shared deadline.
+The stable-release signature and evidence-verification path is unchanged.
+
 ## Docker Compose
 
 Docker cannot normally inspect encryption below the host volume. Compose therefore requires two

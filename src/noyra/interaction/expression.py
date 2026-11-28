@@ -18,6 +18,14 @@ from noyra.core.redaction import redact_secret_text
 from noyra.core.types import ActionRecord, content_hash, utc_now
 from noyra.model import ModelLedger
 
+from .outreach import (
+    OutreachAuthorization,
+    OutreachDenied,
+    eligible_recipients,
+    recipient_key,
+    recipient_policy,
+    route_allows,
+)
 from .public_archive import PublicArchive
 from .store import InteractionStore
 
@@ -88,15 +96,13 @@ class ExpressionStore:
         targets: list[tuple[CapabilityType, str]] = [("publish", "instance:" + self.subject_id)]
         with self.database.connection() as connection:
             transports = connection.execute(
-                "SELECT transport_id,config_json FROM interaction_transports "
-                "WHERE subject_id=? AND status='active'",
+                "SELECT * FROM interaction_transports WHERE subject_id=? AND status='active'",
                 (self.subject_id,),
             ).fetchall()
         from .transport import TransportStore
 
         for row in transports:
-            config = TransportStore._config(row)
-            if config.get("autonomous_send", True) is True:
+            if eligible_recipients(TransportStore._config(row), str(row["channel"])):
                 targets.append(("message", "transport:" + str(row["transport_id"])))
         grants = self.capabilities.list(self.subject_id)
         if not enabled:
@@ -164,6 +170,33 @@ class ExpressionStore:
             if proposal.operation == "message"
             else "instance:" + self.subject_id
         )
+
+        def bind_recipient(connection: Any) -> None:
+            _, authorization = self.require_outreach(
+                connection, str(proposal.transport_id), str(proposal.recipient)
+            )
+            event_id = self._recipient_binding_id(planner_call_id)
+            payload = {
+                "draft_hash": content_hash(proposal.model_dump(mode="json")),
+                "authorization_id": authorization.authorization_id,
+            }
+            existing = self._recipient_binding(connection, event_id)
+            if existing is not None:
+                if existing != payload:
+                    raise OutreachDenied("outreach draft authorization changed")
+                return
+            self.events._append_connection(
+                connection,
+                self.subject_id,
+                "expression_recipient_bound",
+                "expression_supervisor",
+                payload,
+                privacy_level="private",
+                causal_parent_ids=(),
+                occurred_at=None,
+                event_id=event_id,
+            )
+
         return self.actions.prepare(
             self.subject_id,
             "expression",
@@ -172,6 +205,7 @@ class ExpressionStore:
             proposal.model_dump(mode="json"),
             side_effect=True,
             idempotency_key="expression:" + planner_call_id,
+            before_prepare=bind_recipient if proposal.operation == "message" else None,
         )
 
     def execute(
@@ -208,6 +242,13 @@ class ExpressionStore:
         if action.status != "prepared":
             return {"status": action.status, "action_id": action_id}
         kind = "message" if proposal.operation == "message" else "publish"
+        if kind == "message":
+            try:
+                with self.database.read_transaction() as connection:
+                    self._authorize_draft(connection, action, proposal)
+            except OutreachDenied:
+                self.actions.cancel(action_id, "outreach recipient authorization unavailable")
+                raise
         with self.database.connection() as connection:
             charged = connection.execute(
                 "SELECT grant_id FROM capability_uses WHERE subject_id=? "
@@ -251,15 +292,16 @@ class ExpressionStore:
                             )
                 identifier = proposal.publication_id or "expression_" + content_hash(action_id)[:48]
                 if proposal.operation == "message":
-                    self._transport(connection, proposal)
+                    channel, authorization = self._authorize_draft(connection, action, proposal)
+                    body = authorization.notice() + proposal.body
                     interaction = InteractionStore(self.database)._create_connection(
                         connection,
                         self.subject_id,
                         "outgoing",
                         "subject_message",
-                        self._channel(connection, proposal),
+                        channel,
                         str(proposal.recipient),
-                        proposal.body,
+                        body,
                         None,
                         "expression-message:" + action_id,
                         "sent",
@@ -277,6 +319,7 @@ class ExpressionStore:
                             "recipient": proposal.recipient,
                             "grant_id": grant.grant_id,
                             "action_id": action_id,
+                            "authorization_id": authorization.authorization_id,
                         },
                         privacy_level="private",
                         causal_parent_ids=(),
@@ -424,27 +467,67 @@ class ExpressionStore:
                     self.archive._verify(item)
         return len(rows)
 
-    def _transport(self, connection: Any, proposal: ExpressionProposal) -> Any:
+    def _recipient_binding_id(self, planner_call_id: str) -> str:
+        return "evt_expression_recipient_" + content_hash([self.subject_id, planner_call_id])
+
+    def _recipient_binding(self, connection: Any, event_id: str) -> dict[str, Any] | None:
+        row = connection.execute(
+            "SELECT * FROM events WHERE subject_id=? AND event_id=?",
+            (self.subject_id, event_id),
+        ).fetchone()
+        if row is None:
+            return None
+        payload = self.events.payload_from_row(row, connection=connection)
+        if (
+            row["event_type"] != "expression_recipient_bound"
+            or content_hash(payload) != row["payload_hash"]
+            or set(payload) != {"draft_hash", "authorization_id"}
+        ):
+            raise IntegrityError("invalid outreach draft authorization evidence")
+        return payload
+
+    def _authorize_draft(
+        self, connection: Any, action: ActionRecord, proposal: ExpressionProposal
+    ) -> tuple[str, OutreachAuthorization]:
+        channel, authorization = self.require_outreach(
+            connection, str(proposal.transport_id), str(proposal.recipient)
+        )
+        binding = self._recipient_binding(
+            connection,
+            self._recipient_binding_id(action.idempotency_key.removeprefix("expression:")),
+        )
+        if binding != {
+            "draft_hash": action.input_hash,
+            "authorization_id": authorization.authorization_id,
+        }:
+            raise OutreachDenied("outreach draft authorization missing or superseded")
+        if len(authorization.notice()) + len(proposal.body) > 20_000:
+            raise OutreachDenied("outreach body leaves no space for the required notice")
+        return channel, authorization
+
+    def require_outreach(
+        self, connection: Any, transport_id: str, recipient: str
+    ) -> tuple[str, OutreachAuthorization]:
         from .transport import TransportStore
 
         row = connection.execute(
             "SELECT * FROM interaction_transports WHERE subject_id=? "
             "AND transport_id=? AND status='active'",
-            (self.subject_id, proposal.transport_id),
+            (self.subject_id, transport_id),
         ).fetchone()
         if row is None:
-            raise PermissionError("expression transport unavailable")
+            raise OutreachDenied("expression transport unavailable")
+        channel = TransportStore._record(row).channel
         config = TransportStore._config(row)
-        if config.get("autonomous_send", True) is not True:
-            raise PermissionError("autonomous sending disabled for transport")
-        allowed = config.get("allowed_recipients")
+        try:
+            key = recipient_key(channel, recipient)
+        except ValueError:
+            raise OutreachDenied("invalid outreach recipient") from None
+        authorization = recipient_policy(config, channel).get(key)
         if (
-            isinstance(allowed, str)
-            and allowed.strip()
-            and proposal.recipient not in {value.strip() for value in allowed.split(",")}
+            authorization is None
+            or not authorization.active
+            or not route_allows(config, channel, key)
         ):
-            raise PermissionError("recipient outside optional operator scope")
-        return row
-
-    def _channel(self, connection: Any, proposal: ExpressionProposal) -> str:
-        return str(self._transport(connection, proposal)["channel"])
+            raise OutreachDenied("outreach recipient has no current authorization")
+        return channel, authorization

@@ -45,7 +45,12 @@ def test_bearer_capabilities_distinguish_reads_operator_and_export_routes(
         ),
         (
             {"operator", "admin", "break_glass"},
-            ["config/training-policy", "config/transports", "admin/migration/policy"],
+            [
+                "config/training-policy",
+                "config/transports",
+                "config/transports/outreach",
+                "admin/migration/policy",
+            ],
         ),
         ({"export", "admin", "break_glass"}, ["admin/export-jobs"]),
     )
@@ -83,6 +88,45 @@ def test_read_and_export_tokens_cannot_write_operator_conversations(
             assert create.call_count == int(allowed)
     after = server.conversations.list(subject)["items"]
     assert len(after) == len(before) + (2 if allowed else 0)
+
+
+def test_operator_outreach_authorization_requires_opt_in_and_rejects_stale_updates(
+    server: NoyraHTTPServer,
+) -> None:
+    from noyra.interaction import TransportInput
+
+    record = server.transports.configure(
+        server.kernel.subject_id,
+        TransportInput(channel="email", label="Synthetic mail", endpoint="smtps://mail.example"),
+        actor="operator",
+    )
+    path = f"/api/config/transports/{record.transport_id}/outreach"
+    operator = authorization("operator")
+    payload: dict[str, Any] = {
+        "operation": "authorize",
+        "recipient": "test@EXAMPLE.COM",
+        "reason": "opt-in",
+        "operator_name": "Synthetic operator",
+        "opt_out_email": "stop@example.com",
+    }
+    assert call(server, path, payload=payload, headers=operator)[0] == 400
+    payload["confirm_opt_in"] = True
+    for role in ("read", "export", "anonymous"):
+        assert call(server, path, payload=payload, headers=authorization(role))[0] == 401
+    status, entry, _ = call(server, path, payload=payload, headers=operator)
+    assert status == 200 and entry["active"] is True
+    status, inventory, _ = call(server, "/api/config/transports/outreach", headers=operator)
+    assert status == 200 and isinstance(inventory, list)
+    assert inventory[0]["eligible_recipients"] == 1
+    assert "@" not in json.dumps(inventory)
+    status, entry, _ = call(
+        server,
+        path,
+        headers=operator,
+        payload={"operation": "revoke", "recipient": "test@example.com", "reason": "opt-out"},
+    )
+    assert status == 200 and entry["active"] is False
+    assert call(server, path, payload=payload, headers=operator)[0] == 409
 
 
 @pytest.mark.parametrize("role", list(TOKENS))

@@ -263,6 +263,7 @@ docs/development/self-modification-expiry.md
 docs/development/semantic-memory-recovery.md
 docs/development/sleep-failure-recovery.md
 docs/development/social-proposal-recovery.md
+docs/development/source-provenance-contract.md
 docs/development/workflow-export-format.md
 docs/development/workflow-export-publications.md
 docs/development/workflow-increment-metadata.md
@@ -314,6 +315,7 @@ docs/release/2026-10-10-dispatch-remediation-external-acceptance.md
 docs/release/2026-10-10-post-audit-external-acceptance.md
 docs/release/2026-10-11-third-round-external-acceptance.md
 docs/release/README.md
+docs/release/current-source-status.md
 docs/release/external-gates.md
 docs/release/public-files-excluded.txt
 docs/release/public-files.sha256
@@ -638,6 +640,8 @@ src/noyra/core/schema/common_knowledge_trusted_publishers.py
 src/noyra/core/schema/contracts.py
 src/noyra/core/schema/email_identity.py
 src/noyra/core/schema/evidence.py
+src/noyra/core/schema/memory_block_event_lineage.py
+src/noyra/core/schema/memory_block_lineage.py
 src/noyra/core/schema/migrations.py
 src/noyra/core/schema/migrations_v002_v005.py
 src/noyra/core/schema/migrations_v006_v017.py
@@ -655,6 +659,7 @@ src/noyra/core/schema/world_poll.py
 src/noyra/core/secret_cleanup.py
 src/noyra/core/sleep_recovery.py
 src/noyra/core/snapshots.py
+src/noyra/core/source_provenance.py
 src/noyra/core/storage.py
 src/noyra/core/storage_lifecycle.py
 src/noyra/core/storage_mode.py
@@ -740,6 +745,7 @@ src/noyra/interaction/help_language.py
 src/noyra/interaction/inbound.py
 src/noyra/interaction/integrity.py
 src/noyra/interaction/outbound.py
+src/noyra/interaction/outreach.py
 src/noyra/interaction/participant_http.py
 src/noyra/interaction/participants.py
 src/noyra/interaction/posts.py
@@ -749,6 +755,8 @@ src/noyra/interaction/public_cold_reader.py
 src/noyra/interaction/public_contract.py
 src/noyra/interaction/public_display.py
 src/noyra/interaction/public_reading.py
+src/noyra/interaction/reflection_erasure_scope.py
+src/noyra/interaction/reflection_lineage.py
 src/noyra/interaction/rejections.py
 src/noyra/interaction/sitemap_tokens.py
 src/noyra/interaction/smtp_deadline.py
@@ -952,6 +960,7 @@ tests/test_architecture_dependencies.py
 tests/test_architecture_properties.py
 tests/test_archive.py
 tests/test_archive_s3.py
+tests/test_at_rest_permission_monitor.py
 tests/test_at_rest_read_boundaries.py
 tests/test_audit_0dea2dd_contracts.py
 tests/test_audit_0dea2dd_goal_origin.py
@@ -1272,6 +1281,7 @@ tests/test_smtp_deadline_fencing.py
 tests/test_snapshot_compaction.py
 tests/test_soak_collector.py
 tests/test_social_rejection_recovery.py
+tests/test_source_provenance.py
 tests/test_storage.py
 tests/test_storage_lifecycle.py
 tests/test_storage_mode.py

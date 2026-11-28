@@ -673,6 +673,12 @@ class AssistanceStore:
                 "model_call_id": call_id,
                 "disposition": disposition,
                 "reason": choice.reason,
+                "source_event_id": str(link["event_id"]),
+                "source_provenance": {
+                    "category": "human_assistance_reply",
+                    "verification": "unverified",
+                    "authority": "none",
+                },
             }
             EventStore(self.database)._append_connection(
                 connection,

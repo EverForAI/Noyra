@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator
 
 
 class FatigueInputs(BaseModel):
@@ -128,7 +128,9 @@ class PersonalityCandidateInput(BaseModel):
         return value
 
 
-class SleepReflectionPlan(BaseModel):
+class SleepReflectionProposal(BaseModel):
+    """Model-facing reflection output. Goals are read-only context."""
+
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     summary: str = Field(min_length=1, max_length=20_000)
@@ -138,7 +140,6 @@ class SleepReflectionPlan(BaseModel):
     unresolved_questions: tuple[str, ...] = Field(default=(), max_length=128)
     public_diary_candidate: str | None = Field(default=None, max_length=20_000)
     memories: tuple[SleepMemory, ...] = Field(default=(), max_length=32)
-    goal_revisions: tuple[SleepGoalRevision, ...] = Field(default=(), max_length=32)
     belief_revisions: tuple[SleepBeliefRevision, ...] = Field(default=(), max_length=32)
     retry_blocks: tuple[SleepRetryBlock, ...] = Field(default=(), max_length=32)
     personality_candidates: tuple[PersonalityCandidateInput, ...] = Field(default=(), max_length=32)
@@ -165,6 +166,18 @@ class SleepReflectionPlan(BaseModel):
         if len(set(value)) != len(value):
             raise ValueError("sleep reflection list entries must be unique")
         return value
+
+
+class SleepReflectionPlan(SleepReflectionProposal):
+    """Persisted reflection format, including pre-boundary history."""
+
+    goal_revisions: tuple[SleepGoalRevision, ...] = Field(default=(), max_length=32)
+    # Bound by local cognition after validation, outside the proposal and plan hash.
+    _model_call_id: str | None = PrivateAttr(default=None)
+
+    @classmethod
+    def after_source_withdrawal(cls) -> SleepReflectionPlan:
+        return cls(summary="Bounded fallback reflection: a private input was withdrawn.")
 
 
 @dataclass(frozen=True)

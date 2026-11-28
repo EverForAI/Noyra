@@ -30,6 +30,18 @@ from noyra.wallet import (
     WalletSignerError,
     WalletStore,
 )
+from noyra.wallet import execution as wallet_execution
+
+
+@pytest.fixture(autouse=True)
+def custom_mock_signers_are_simulation_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    classify = wallet_execution.wallet_signer_requires_evidence
+
+    def explicit_simulation(signer: Any) -> bool:
+        return False if isinstance(signer, MockSigner) else classify(signer)
+
+    monkeypatch.setattr(wallet_execution, "wallet_signer_requires_evidence", explicit_simulation)
+
 
 SOURCE_ADDRESS = "0xA111111111111111111111111111111111111111"
 
@@ -321,6 +333,99 @@ def test_emergency_pause_fails_closed_for_existing_and_new_orders(tmp_path: Path
     )
     new_order = economy.order_for_submission(decided.submission_id, subject_id)
     assert new_order is not None and new_order.status == "rejected"
+
+
+def test_external_signer_release_evidence_is_rechecked_at_dispatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database, subject_id, _wallets, economy, network, asset, source = _fixture(tmp_path)
+    goal_id = _goal(database, subject_id, goal_id="external-signer-release-gate")
+    bounty = _bounty(
+        economy,
+        subject_id,
+        network.network_id,
+        asset.asset_id,
+        goal_id,
+        key="external-signer-release-gate",
+    )
+    economy.publish_bounty(bounty.bounty_id, subject_id, actor="operator")
+    submission = economy.submit(bounty.bounty_id, subject_id, _submission(76))
+    accepted = economy.decide_submission(
+        submission.submission_id,
+        subject_id,
+        accepted=True,
+        reason="verified",
+        actor="operator",
+    )
+    order = economy.order_for_submission(accepted.submission_id, subject_id)
+    assert order is not None
+    signer = MockSigner(chain_id=network.chain_id, source_address=source.address)
+    from noyra.wallet import economy as wallet_economy
+    from noyra.wallet import execution as wallet_execution
+
+    monkeypatch.setattr(wallet_execution, "wallet_signer_requires_evidence", lambda _: True)
+    economy.protected_signing = True
+    checks: list[tuple[bool, bool]] = []
+
+    def authorize(*, automatic: bool, testnet: bool = False) -> None:
+        checks.append((automatic, testnet))
+
+    monkeypatch.setattr(wallet_execution, "require_wallet_activation_evidence", authorize)
+    monkeypatch.setattr(wallet_economy, "require_wallet_activation_evidence", authorize)
+    result = WalletPaymentExecutionEngine(database, signer, economy=economy).execute_order(
+        order.order_id, subject_id, actor="operator"
+    )
+    assert result.status == "broadcast"
+    assert checks == [(True, False)] * 6
+    assert len(signer.requests) == 1
+
+
+def test_protected_signer_without_release_evidence_never_reaches_signer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database, subject_id, _wallets, economy, network, asset, source = _fixture(tmp_path)
+    goal_id = _goal(database, subject_id, goal_id="missing-external-gate")
+    bounty = _bounty(
+        economy,
+        subject_id,
+        network.network_id,
+        asset.asset_id,
+        goal_id,
+        key="missing-external-gate",
+    )
+    economy.publish_bounty(bounty.bounty_id, subject_id, actor="operator")
+    submission = economy.submit(bounty.bounty_id, subject_id, _submission(77))
+    accepted = economy.decide_submission(
+        submission.submission_id,
+        subject_id,
+        accepted=True,
+        reason="verified",
+        actor="operator",
+    )
+    order = economy.order_for_submission(accepted.submission_id, subject_id)
+    assert order is not None and order.status == "reserved"
+    signer = MockSigner(chain_id=network.chain_id, source_address=source.address)
+    from noyra.wallet import execution as wallet_execution
+
+    monkeypatch.setattr(wallet_execution, "wallet_signer_requires_evidence", lambda _: True)
+
+    def deny(**_: Any) -> None:
+        raise ValueError("wallet_release_evidence_required")
+
+    monkeypatch.setattr(wallet_execution, "require_wallet_activation_evidence", deny)
+    with pytest.raises(ValueError, match="wallet payment execution is no longer authorized"):
+        WalletPaymentExecutionEngine(database, signer, economy=economy).execute_order(
+            order.order_id, subject_id, actor="operator"
+        )
+    assert signer.requests == []
+    assert economy.list_orders(subject_id)[0].status == "reserved"
+    with database.read_transaction() as connection:
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM wallet_payment_executions WHERE order_id=?", (order.order_id,)
+            ).fetchone()[0]
+            == 0
+        )
 
 
 def test_pause_during_unknown_payment_blocks_retry_without_new_attempt(tmp_path: Path) -> None:

@@ -1,4 +1,4 @@
-"""Historical schema116/117 fixtures and the actual reviewed migrations."""
+"""Fixtures for explicit historical workflow recovery migrations."""
 
 from __future__ import annotations
 
@@ -16,17 +16,16 @@ from noyra.core import workflow_source_recovery as recovery
 from noyra.core.schema.contracts import _SCHEMA_DDL_FINGERPRINTS, _SCHEMA_STRUCTURE_FINGERPRINTS
 from test_d2b_workflow_export_control import control as current_control
 
-TARGET = 118
+TARGET_BY_SOURCE = {116: 118, 117: 118, 124: 125}
 
 
 @pytest.fixture
 def control(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
 ) -> Iterator[object]:
-    # Only fixture creation uses the historical runtime version. Recovery runs
-    # the actual migrations with original rows and frozen contract fingerprints.
+    # Create the original rows at the source schema for the selected transition.
     version = getattr(request, "param", 116)
-    assert version in (116, 117)
+    assert version in TARGET_BY_SOURCE
     with patch.object(database_module, "CURRENT_SCHEMA_VERSION", version):
         controls = cast(Any, current_control).__wrapped__(tmp_path, monkeypatch)
         instance = next(controls)
@@ -43,15 +42,15 @@ def measured_pair(database: Database) -> recovery.RecoverySchemaPair:
                 0
             ]
         )
-        assert version in (116, 117)
+        target = TARGET_BY_SOURCE[version]
         assert Database.schema_ddl_fingerprint(snapshot) == _SCHEMA_DDL_FINGERPRINTS[version]
     return recovery.RecoverySchemaPair(
         version,
         _SCHEMA_DDL_FINGERPRINTS[version],
-        TARGET,
-        _SCHEMA_DDL_FINGERPRINTS[TARGET],
+        target,
+        _SCHEMA_DDL_FINGERPRINTS[target],
         _SCHEMA_STRUCTURE_FINGERPRINTS[version],
-        _SCHEMA_STRUCTURE_FINGERPRINTS[TARGET],
+        _SCHEMA_STRUCTURE_FINGERPRINTS[target],
     )
 
 
@@ -59,11 +58,12 @@ def measured_pair(database: Database) -> recovery.RecoverySchemaPair:
 def publication_upgrade_runtime(
     pair: recovery.RecoverySchemaPair, *, approved: bool = True
 ) -> Iterator[None]:
-    # Contracts and migration are actual production definitions. Only negative
-    # tests disable the explicitly reviewed source-recovery pair.
+    # Stop at the release under test while running the real migrations and
+    # fingerprint checks. This also applies when a fresh process boots the DB.
     assert pair in recovery._REVIEWED_SCHEMA_PAIRS
-    if approved:
-        yield
-    else:
-        with patch.object(recovery, "_REVIEWED_SCHEMA_PAIRS", ()):
+    with patch.object(database_module, "CURRENT_SCHEMA_VERSION", pair.target_version):
+        if approved:
             yield
+        else:
+            with patch.object(recovery, "_REVIEWED_SCHEMA_PAIRS", ()):
+                yield

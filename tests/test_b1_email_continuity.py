@@ -79,13 +79,8 @@ async def test_signed_protocol_establishes_private_thread_and_replies_with_origi
     case = mail_case
     transport = configure(case)
     interactions = InteractionStore(case.db)
-    interactions.send(
-        case.subject,
-        "email",
-        "helper@example.com",
-        "Public opening question",
-        idempotency_key="expression-message:b1-opening",
-    )
+    case.authorize_contact(transport, "helper@example.com")
+    opening = await case.queue_contact(transport, "helper@example.com", "Public opening question")
     dispatcher = DeliveryDispatcher(case.db, case.transports)
     try:
         first = (await dispatcher.deliver_pending(case.subject))[0]
@@ -97,11 +92,12 @@ async def test_signed_protocol_establishes_private_thread_and_replies_with_origi
         assert [
             row["content"]
             for row in ParticipantStore(case.db).history(case.subject, accepted.interaction_id)
-        ] == ["Public opening question"]
+        ] == [interactions.get(opening["interaction_id"]).content]
         interactions.decide(
             accepted.interaction_id,
             InteractionDecision(disposition="accepted", rationale="Continue privately"),
         )
+        case.revoke_contact(transport, "helper@example.com")
         interactions.send(
             case.subject,
             "email",
@@ -258,13 +254,8 @@ async def test_parallel_first_replies_commit_one_stable_private_conversation(
 ) -> None:
     case = mail_case
     transport = configure(case)
-    InteractionStore(case.db).send(
-        case.subject,
-        "email",
-        "helper@example.com",
-        "Public opening",
-        idempotency_key="expression-message:b1-parallel",
-    )
+    case.authorize_contact(transport, "helper@example.com")
+    opening = await case.queue_contact(transport, "helper@example.com", "Public opening")
     dispatcher = DeliveryDispatcher(case.db, case.transports)
     try:
         delivery = (await dispatcher.deliver_pending(case.subject))[0]
@@ -300,7 +291,10 @@ async def test_parallel_first_replies_commit_one_stable_private_conversation(
         assert c.execute("SELECT COUNT(*) FROM email_ingress_evidence").fetchone()[0] == 2
     for result in received:
         history = ParticipantStore(case.db).history(case.subject, result.interaction_id)
-        assert history[0]["content"] == "Public opening"
+        assert (
+            history[0]["content"]
+            == InteractionStore(case.db).get(opening["interaction_id"]).content
+        )
     InteractionIntegrity(case.db).verify(case.subject)
 
 
@@ -642,13 +636,8 @@ async def test_case_insensitive_account_domain_preserves_verified_direct_reply_l
 ) -> None:
     case = mail_case
     transport = configure(case, account_id="noyra@EXAMPLE.COM")
-    InteractionStore(case.db).send(
-        case.subject,
-        "email",
-        "helper@example.com",
-        "Opening",
-        idempotency_key="expression-message:b1-canonical-account",
-    )
+    case.authorize_contact(transport, "helper@example.com")
+    opening = await case.queue_contact(transport, "helper@example.com", "Opening")
     dispatcher = DeliveryDispatcher(case.db, case.transports)
     try:
         delivered = (await dispatcher.deliver_pending(case.subject))[0]
@@ -662,7 +651,7 @@ async def test_case_insensitive_account_domain_preserves_verified_direct_reply_l
     assert [
         row["content"]
         for row in ParticipantStore(case.db).history(case.subject, accepted.interaction_id)
-    ] == ["Opening"]
+    ] == [InteractionStore(case.db).get(opening["interaction_id"]).content]
 
 
 def test_unverified_source_cooling_is_bounded_without_blocking_existing_retries(

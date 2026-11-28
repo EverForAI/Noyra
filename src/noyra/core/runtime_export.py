@@ -14,6 +14,7 @@ from noyra.world.store import ObservationStore
 
 from .database import CURRENT_SCHEMA_VERSION, Database
 from .events import EventStore
+from .export_jobs import assert_no_private_erasure, private_erasure_epoch
 from .identity import validate_subject_id
 from .payload_codec import decompress_text
 from .redaction import is_sensitive_key, redact_secret_text
@@ -769,6 +770,27 @@ _OWNERSHIP_GRAPHS[118] = {
         parameter_count=3,
     ),
 }
+_OWNERSHIP_GRAPHS[119] = _OWNERSHIP_GRAPHS[118]
+# Schema 120 changes reflection guards without changing table ownership.
+_OWNERSHIP_GRAPHS[120] = _OWNERSHIP_GRAPHS[119]
+# Schema 121 adds only guarded redaction triggers; subject ownership is unchanged.
+_OWNERSHIP_GRAPHS[121] = _OWNERSHIP_GRAPHS[120]
+# Schema 122 adds revision source evidence owned by its memory-block revision.
+_OWNERSHIP_GRAPHS[122] = {
+    **_OWNERSHIP_GRAPHS[121],
+    "memory_block_revision_lineage": _parent_rule("memory_blocks", "block_id", "block_id"),
+    "memory_block_revision_sources": _parent_rule("memory_blocks", "block_id", "block_id"),
+}
+# Schema 123 adds revision-level event source coverage and references.
+_OWNERSHIP_GRAPHS[123] = {
+    **_OWNERSHIP_GRAPHS[122],
+    "memory_block_revision_event_coverage": _parent_rule("memory_blocks", "block_id", "block_id"),
+    "memory_block_revision_event_sources": _parent_rule("memory_blocks", "block_id", "block_id"),
+}
+# Schema 124 adds guarded memory-block redaction without changing ownership.
+_OWNERSHIP_GRAPHS[124] = _OWNERSHIP_GRAPHS[123]
+# Schema 125 adds guarded entity graph redaction without changing ownership.
+_OWNERSHIP_GRAPHS[125] = _OWNERSHIP_GRAPHS[124]
 
 
 @dataclass(frozen=True)
@@ -828,6 +850,11 @@ class RuntimeLogExporter:
         timestamp = created_at.replace(":", "").replace("-", "").replace("+00:00", "Z")
         filename = f"noyra-runtime-{subject_id}-{timestamp}.zip"
         published = False
+        privacy_epoch = None
+        if control is None:
+            with self.database.connection() as connection:
+                privacy_epoch = private_erasure_epoch(connection, subject_id)
+                assert_no_private_erasure(connection, subject_id, epoch=privacy_epoch)
         try:
             # The export itself may take minutes or hours.  Read from an
             # isolated SQLite backup so serialising/compressing rows never
@@ -1011,9 +1038,10 @@ class RuntimeLogExporter:
                 )
 
             if control is None:
-                temporary.replace(output)
-                published = True
                 with self.database.transaction() as connection:
+                    assert_no_private_erasure(connection, subject_id, epoch=privacy_epoch)
+                    temporary.replace(output)
+                    published = True
                     record_export(connection)
             else:
                 control.checkpoint()

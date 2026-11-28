@@ -20,6 +20,7 @@ from noyra.wallet.execution import (
     WalletUnsignedTransfer,
 )
 from noyra.wallet.local import LocalWalletSigner
+from noyra.wallet.types import LOCAL_SIGNING_CHAIN_ID
 
 RECIPIENT = "0x" + "22" * 20
 CONTRACT = "0x" + "33" * 20
@@ -32,7 +33,7 @@ def account() -> LocalAccount:
 
 def transfer(*, token: bool = False) -> WalletUnsignedTransfer:
     return WalletUnsignedTransfer(
-        chain_id=1,
+        chain_id=LOCAL_SIGNING_CHAIN_ID,
         nonce=0,
         gas_limit=100_000 if token else 21_000,
         max_fee_per_gas="2000000000",
@@ -69,7 +70,7 @@ class Chain:
                 },
             )
         defaults = {
-            "eth_chainId": "0x1",
+            "eth_chainId": hex(LOCAL_SIGNING_CHAIN_ID),
             "eth_getTransactionCount": "0x0",
             "eth_getBalance": hex(10**20),
             "eth_gasPrice": hex(10**9),
@@ -95,7 +96,9 @@ class Chain:
 @contextmanager
 def signer(chain: Chain) -> Iterator[LocalWalletSigner]:
     with httpx.Client(transport=httpx.MockTransport(chain.handle)) as client:
-        instance = LocalWalletSigner(account(), {1: "https://rpc.example"}, client=client)
+        instance = LocalWalletSigner(
+            account(), {LOCAL_SIGNING_CHAIN_ID: "https://rpc.example"}, client=client
+        )
         try:
             yield instance
         finally:
@@ -110,7 +113,7 @@ def test_local_signs_real_fixed_transfer_and_deterministic_restart_retry(token: 
         result = wallet.sign_and_broadcast(envelope, request_id="payment:1")
         assert Account.recover_transaction(chain.sent[0]).lower() == envelope.source_address
         assert result.tx_hash == "0x" + keccak(bytes.fromhex(chain.sent[0][2:])).hex()
-        assert result.chain_id == 1 and result.nonce == 0
+        assert result.chain_id == LOCAL_SIGNING_CHAIN_ID and result.nonce == 0
     with signer(chain) as wallet:
         retried = wallet.sign_and_broadcast(envelope, request_id="payment:2")
     assert result.tx_hash == retried.tx_hash
@@ -168,7 +171,7 @@ def test_receipt_rpc_failure_remains_distinguishable_from_bad_receipt_evidence()
     chain.errors["eth_getTransactionReceipt"] = "private provider diagnostic"
     tx_hash = "0x" + "aa" * 32
     with signer(chain) as wallet, pytest.raises(WalletRPCError) as error:
-        wallet.get_receipt(tx_hash, chain_id=1)
+        wallet.get_receipt(tx_hash, chain_id=LOCAL_SIGNING_CHAIN_ID)
     assert error.value.reason_code == "rpc_unavailable"
     assert "private provider diagnostic" not in str(error.value)
 
@@ -196,7 +199,7 @@ def test_wrong_source_and_noncanonical_token_input_never_broadcast() -> None:
 def test_nonce_quote_and_fee_quote_are_chain_derived() -> None:
     chain = Chain()
     with signer(chain) as wallet:
-        assert wallet.get_pending_nonce(account().address, chain_id=1) == 0
+        assert wallet.get_pending_nonce(account().address, chain_id=LOCAL_SIGNING_CHAIN_ID) == 0
         gas, fee = wallet.get_fee_quote(transfer())
         assert gas >= 21_000
         assert int(fee) >= 10**9
@@ -205,7 +208,7 @@ def test_nonce_quote_and_fee_quote_are_chain_derived() -> None:
 def mined(chain: Chain, envelope: WalletUnsignedTransfer, tx_hash: str) -> None:
     chain.transaction = {
         "hash": tx_hash,
-        "chainId": "0x1",
+        "chainId": hex(LOCAL_SIGNING_CHAIN_ID),
         "nonce": "0x0",
         "from": envelope.source_address,
         "to": envelope.to_address,
@@ -252,13 +255,13 @@ def test_receipt_verifies_canonical_block_and_transfer_effect(token: bool) -> No
         result = wallet.sign_and_broadcast(envelope, request_id="payment")
     mined(chain, envelope, result.tx_hash)
     with signer(chain) as wallet:
-        receipt = wallet.get_receipt(result.tx_hash, chain_id=1)
+        receipt = wallet.get_receipt(result.tx_hash, chain_id=LOCAL_SIGNING_CHAIN_ID)
         assert receipt is not None
         assert receipt.status == 1 and receipt.confirmations == 3
         assert receipt.effect_hash == "0x" + content_hash(
             {
                 "tx_hash": result.tx_hash,
-                "chain_id": 1,
+                "chain_id": LOCAL_SIGNING_CHAIN_ID,
                 "asset_type": envelope.asset_type,
                 "contract_address": envelope.contract_address,
                 "recipient_address": RECIPIENT,
@@ -267,7 +270,7 @@ def test_receipt_verifies_canonical_block_and_transfer_effect(token: bool) -> No
         )
         chain.overrides["eth_getBlockByNumber"] = {"number": "0x64", "hash": "0x" + "bb" * 32}
         with pytest.raises(WalletExecutionError):
-            wallet.get_receipt(result.tx_hash, chain_id=1)
+            wallet.get_receipt(result.tx_hash, chain_id=LOCAL_SIGNING_CHAIN_ID)
 
 
 @pytest.mark.parametrize("corruption", ["no_log", "wrong_amount", "wrong_sender", "wrong_tx"])
@@ -286,7 +289,7 @@ def test_successful_token_receipt_without_matching_effect_is_rejected(corruption
         else:
             chain.transaction["value"] = "0x1"
         with pytest.raises(WalletExecutionError):
-            wallet.get_receipt(result.tx_hash, chain_id=1)
+            wallet.get_receipt(result.tx_hash, chain_id=LOCAL_SIGNING_CHAIN_ID)
 
 
 @pytest.mark.parametrize(
@@ -294,4 +297,13 @@ def test_successful_token_receipt_without_matching_effect_is_rejected(corruption
 )
 def test_local_rpc_rejects_unsafe_endpoint(url: str) -> None:
     with pytest.raises(ValueError):
-        LocalWalletSigner(account(), {1: url})
+        LocalWalletSigner(account(), {LOCAL_SIGNING_CHAIN_ID: url})
+
+
+def test_local_constructor_and_transfer_reject_protected_chain() -> None:
+    with pytest.raises(ValueError, match="isolated development testnet"):
+        LocalWalletSigner(account(), {1: "https://rpc.example"})
+    chain = Chain()
+    with signer(chain) as wallet, pytest.raises(WalletSignerError, match="transfer is invalid"):
+        wallet.sign_and_broadcast(transfer().model_copy(update={"chain_id": 1}), request_id="test")
+    assert chain.sent == []

@@ -10,6 +10,7 @@ import httpx
 import pytest
 from pydantic import BaseModel, SecretStr
 
+from noyra.autonomy import AutonomyLoop
 from noyra.cognition.reflection import ReflectionCognitionPending, SleepReflectionCognition
 from noyra.cognition.settings import CognitionSettings
 from noyra.core import Database, EventStore, IdentityStore, SubjectKernel
@@ -34,7 +35,7 @@ from noyra.model.openai_compatible import OpenAICompatibleProvider
 from noyra.model.request_identity import business_request_key
 from noyra.model.resources import RoutedModelGateway
 from noyra.model.types import ModelUsage, ProviderResponse, RetryPolicy
-from noyra.sleep import SleepEngine, SleepReflectionPlan
+from noyra.sleep import SleepEngine, SleepIntegrity, SleepReflectionPlan
 
 
 class Output(BaseModel):
@@ -132,14 +133,14 @@ async def test_business_round_unknown_cannot_be_bypassed_by_old_counter_keys(
 
 
 @pytest.mark.asyncio
-async def test_real_reflection_keeps_unknown_identity(
+async def test_real_reflection_finishes_sleep_without_resending_unknown_call(
     kernel: SubjectKernel, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     store, _ = resources_for(kernel.database, kernel.subject_id, tmp_path, "deep")
     provider = FakeProvider(
         [
             ProviderCallError("provider_outcome_unknown", retryable=False, outcome_unknown=True),
-            response(),
+            ProviderResponse('{"summary":"Unexpected remote reflection"}', ModelUsage(3, 3)),
         ]
     )
     gateway = RoutedModelGateway(
@@ -156,11 +157,54 @@ async def test_real_reflection_keeps_unknown_identity(
     )
     with pytest.raises(ReflectionCognitionPending):
         await cognition.propose(run)
-    monkeypatch.setattr("noyra.model.resources.utc_now", lambda: "2099-01-01T00:00:00+00:00")
-    with pytest.raises(ReflectionCognitionPending):
-        await cognition.propose(run)
     assert len(provider.requests) == 1
-    assert len(gateway.ledger.unknown_calls(kernel.subject_id)) == 1
+    (unknown_call,) = gateway.ledger.unknown_calls(kernel.subject_id)
+    attempts = gateway.ledger.attempts(unknown_call.call_id)
+    assert len(attempts) == 1 and attempts[0].status == "unknown"
+    request_key = business_request_key(kernel.database, kernel.subject_id, unknown_call.purpose)
+
+    monkeypatch.setattr("noyra.model.resources.utc_now", lambda: "2099-01-01T00:00:00+00:00")
+    loop = AutonomyLoop(kernel, reflection_hook=cognition.propose)
+    for action in ("reflection_committed", "deep_sleep_entered", "wake_started", "wake_completed"):
+        assert (await loop.tick()).action == action
+    finished = loop.sleep.get(run.sleep_id)
+    assert finished.status == "complete"
+    assert kernel.lifecycle.current().state == "active" and kernel.admission.accepting
+    with kernel.database.read_transaction() as connection:
+        row = connection.execute(
+            "SELECT r.plan_json, e.payload_json FROM sleep_reflections r "
+            "JOIN events e ON e.event_id=r.event_id WHERE r.sleep_id=?",
+            (run.sleep_id,),
+        ).fetchone()
+        assert row is not None
+        assert "model_call_id" not in json.loads(row["payload_json"])
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM model_calls WHERE subject_id=? AND purpose=?",
+                (kernel.subject_id, unknown_call.purpose),
+            ).fetchone()[0]
+            == 1
+        )
+    plan = SleepReflectionPlan.model_validate_json(row["plan_json"])
+    assert "prior reflection request is fenced" in plan.summary
+    assert not any(
+        (
+            plan.memories,
+            plan.belief_revisions,
+            plan.goal_revisions,
+            plan.retry_blocks,
+            plan.personality_candidates,
+            plan.public_diary_candidate,
+        )
+    )
+    assert len(provider.requests) == 1
+    assert (
+        business_request_key(kernel.database, kernel.subject_id, unknown_call.purpose)
+        == request_key
+    )
+    assert gateway.ledger.unknown_calls(kernel.subject_id) == [unknown_call]
+    assert gateway.ledger.attempts(unknown_call.call_id) == attempts
+    SleepIntegrity(kernel.database).verify(kernel.subject_id)
 
 
 @pytest.mark.asyncio

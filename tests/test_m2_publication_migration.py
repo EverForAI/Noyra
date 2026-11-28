@@ -19,6 +19,7 @@ import pytest
 from noyra.core import Database, IdentityStore
 from noyra.core import database as database_module
 from noyra.core.archive import ArchiveKeyring
+from noyra.core.database import CURRENT_SCHEMA_VERSION
 from noyra.core.errors import IntegrityError
 from noyra.core.schema.contracts import _SCHEMA_DDL_FINGERPRINTS, _SCHEMA_STRUCTURE_FINGERPRINTS
 from noyra.core.types import canonical_json, content_hash
@@ -334,7 +335,8 @@ def test_legacy_upgrade_preserves_exact_rows_and_reopens_without_duplicate_recei
     for _ in range(2):
         current = Database(old.path, strict_schema_contract=True)
         after = snapshot(current)
-        assert after["version"] == "118" and after["ddl"] == _SCHEMA_DDL_FINGERPRINTS[118]
+        assert after["version"] == str(CURRENT_SCHEMA_VERSION)
+        assert after["ddl"] == _SCHEMA_DDL_FINGERPRINTS[CURRENT_SCHEMA_VERSION]
         for table, rows in before["rows"].items():
             if table not in {"schema_meta", "persistent_features"}:
                 assert after["rows"][table] == rows, table

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import socket
 import threading
 import time
@@ -16,6 +17,7 @@ from pydantic import SecretStr
 
 from noyra.core import SubjectKernel, release_assurance, release_http
 from noyra.core import http as bounded_http
+from noyra.core import upgrade as upgrade_module
 from noyra.core.deadline import operation_deadline, remaining_seconds
 from noyra.core.http import HTTPResponseLimitError
 from noyra.core.upgrade import UpgradeError, UpgradeManager
@@ -175,6 +177,191 @@ def test_metadata_limits_and_upgrade_error_contracts(
         with pytest.raises(HTTPResponseLimitError if kind == "oversize" else ValueError):
             release_http.read_release_metadata("https://example.com", maximum=10, timeout=1)
     assert len(calls) == 1
+
+
+def test_development_upgrade_fetches_compact_sha_bound_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    sha = "a" * 40
+    merged_files = [
+        {"filename": f"src/module/{index}.py", "patch": "x" * 128} for index in range(2_000)
+    ]
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        path = request.url.path
+        if path.endswith("/git/ref/heads/main"):
+            return httpx.Response(
+                200,
+                json={
+                    "ref": "refs/heads/main",
+                    "object": {"type": "commit", "sha": sha},
+                },
+            )
+        if path.endswith(f"/git/commits/{sha}"):
+            return httpx.Response(
+                200,
+                json={
+                    "sha": sha,
+                    "committer": {"date": "2026-11-24T00:00:00Z"},
+                    "message": "A large but valid merge\n\nDetails",
+                    "tree": {"sha": "b" * 40},
+                    "parents": [{"sha": "c" * 40}],
+                },
+            )
+        if path == "/repos/example/noyra/commits/main":
+            return httpx.Response(
+                200,
+                json={"sha": sha, "files": merged_files},
+            )
+        pytest.fail(f"unexpected GitHub endpoint: {path}")
+
+    install_transport(monkeypatch, httpx.MockTransport(respond))
+    manager = UpgradeManager(
+        github_owner="example",
+        github_repo="noyra",
+        channel="development-main",
+    )
+    result = manager._fetch_github_metadata()
+    assert result == {
+        "sha": sha,
+        "committed_at": "2026-11-24T00:00:00Z",
+        "title": "A large but valid merge",
+    }
+    assert len(calls) == 2
+    assert calls[0].endswith("/git/ref/heads/main")
+    assert calls[1].endswith(f"/git/commits/{sha}")
+    assert all("/commits/main" not in call for call in calls)
+
+
+def test_development_upgrade_metadata_requests_share_one_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sha = "d" * 40
+    budgets: list[float] = []
+
+    def metadata(url: str, *, maximum: int, timeout: float) -> bytes:
+        budgets.append(remaining_seconds(timeout))
+        time.sleep(0.03)
+        if url.endswith("/git/ref/heads/main"):
+            value: dict[str, Any] = {
+                "ref": "refs/heads/main",
+                "object": {"type": "commit", "sha": sha},
+            }
+        else:
+            value = {
+                "sha": sha,
+                "committer": {"date": "2026-11-24T00:00:00Z"},
+                "message": "bounded metadata",
+            }
+        return json.dumps(value).encode()
+
+    monkeypatch.setattr(upgrade_module, "read_release_metadata", metadata)
+    manager = UpgradeManager(
+        github_owner="example", github_repo="noyra", channel="development-main"
+    )
+    assert manager._fetch_github_metadata()["sha"] == sha
+    assert len(budgets) == 2 and budgets[1] < budgets[0] - 0.02
+
+
+@pytest.mark.parametrize("oversized", ["reference", "commit"])
+def test_compact_upgrade_metadata_retains_per_response_size_limits(
+    monkeypatch: pytest.MonkeyPatch, oversized: str
+) -> None:
+    calls: list[str] = []
+    sha = "a" * 40
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        if oversized == "reference":
+            return httpx.Response(
+                200,
+                json={
+                    "ref": "refs/heads/main",
+                    "object": {"type": "commit", "sha": sha},
+                    "padding": "x" * 20_000,
+                },
+            )
+        if request.url.path.endswith("/git/ref/heads/main"):
+            return httpx.Response(
+                200, json={"ref": "refs/heads/main", "object": {"type": "commit", "sha": sha}}
+            )
+        return httpx.Response(
+            200,
+            json={
+                "sha": sha,
+                "committer": {"date": "2026-11-24T00:00:00Z"},
+                "message": "merge",
+                "padding": "x" * 40_000,
+            },
+        )
+
+    install_transport(monkeypatch, httpx.MockTransport(respond))
+    manager = UpgradeManager(
+        github_owner="example", github_repo="noyra", channel="development-main"
+    )
+    with pytest.raises(UpgradeError, match="upgrade_unavailable"):
+        manager._fetch_github_metadata()
+    assert len(calls) == (1 if oversized == "reference" else 2)
+
+
+@pytest.mark.parametrize(
+    "reference",
+    [
+        {"ref": "refs/heads/other", "object": {"type": "commit", "sha": "a" * 40}},
+        {"ref": "refs/heads/main", "object": {"type": "tree", "sha": "a" * 40}},
+        {"ref": "refs/heads/main", "object": {"type": "commit", "sha": "not-a-sha"}},
+    ],
+)
+def test_compact_upgrade_metadata_rejects_malformed_ref_before_commit_fetch(
+    monkeypatch: pytest.MonkeyPatch, reference: dict[str, object]
+) -> None:
+    calls: list[str] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        return httpx.Response(200, json=reference)
+
+    install_transport(monkeypatch, httpx.MockTransport(respond))
+    manager = UpgradeManager(
+        github_owner="example", github_repo="noyra", channel="development-main"
+    )
+    with pytest.raises(UpgradeError, match="upgrade_unavailable"):
+        manager._fetch_github_metadata()
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("mutation", ["sha", "date", "message"])
+def test_compact_upgrade_metadata_rejects_mismatched_commit(
+    monkeypatch: pytest.MonkeyPatch, mutation: str
+) -> None:
+    sha = "a" * 40
+    payload: dict[str, Any] = {
+        "sha": sha,
+        "committer": {"date": "2026-11-24T00:00:00Z"},
+        "message": "commit title",
+    }
+    if mutation == "sha":
+        payload["sha"] = "b" * 40
+    elif mutation == "date":
+        payload.pop("committer")
+    else:
+        payload["message"] = 5
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/git/ref/heads/main"):
+            return httpx.Response(
+                200, json={"ref": "refs/heads/main", "object": {"type": "commit", "sha": sha}}
+            )
+        return httpx.Response(200, json=payload)
+
+    install_transport(monkeypatch, httpx.MockTransport(respond))
+    manager = UpgradeManager(
+        github_owner="example", github_repo="noyra", channel="development-main"
+    )
+    with pytest.raises(UpgradeError, match="upgrade_unavailable"):
+        manager._fetch_github_metadata()
 
 
 @pytest.fixture

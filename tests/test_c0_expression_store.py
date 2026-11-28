@@ -28,6 +28,7 @@ from noyra.interaction import (
 )
 from noyra.interaction.email_identity import EmailIdentity
 from noyra.interaction.expression import ExpressionProposal, ExpressionReview, ExpressionStore
+from noyra.interaction.outreach import OutreachChange, OutreachDenied
 from noyra.interaction.participants import ParticipantStore
 from noyra.interaction.public_archive import PublicArchive
 from noyra.interaction.types import InteractionDecision
@@ -100,6 +101,48 @@ class ExpressionStoreTestCase(unittest.IsolatedAsyncioTestCase):
     def prepare(self, proposal: ExpressionProposal) -> str:
         self.sequence += 1
         return self.store.prepare(proposal, "fixture-planner-" + str(self.sequence)).action_id
+
+    def authorize_contact(
+        self, transport: TransportRecord, recipient: str, *, expected: str | None = None
+    ) -> str:
+        result = self.transports.change_outreach(
+            transport.transport_id,
+            OutreachChange(
+                operation="authorize",
+                recipient=recipient,
+                reason="Synthetic opt-in",
+                confirm_opt_in=True,
+                operator_name="Fixture Operator",
+                opt_out_email="stop@example.com",
+                expected_authorization_id=expected,
+            ),
+            actor="operator",
+            subject_id=self.subject,
+        )
+        self.store.ensure_grants(enabled=True, rate=20)
+        return str(result["authorization_id"])
+
+    def revoke_contact(self, transport: TransportRecord, recipient: str) -> str:
+        result = self.transports.change_outreach(
+            transport.transport_id,
+            OutreachChange(operation="revoke", recipient=recipient, reason="Synthetic opt-out"),
+            actor="operator",
+            subject_id=self.subject,
+        )
+        return str(result["authorization_id"])
+
+    async def queue_contact(
+        self, transport: TransportRecord, recipient: str, body: str
+    ) -> dict[str, Any]:
+        proposal = ExpressionProposal(
+            operation="message",
+            body=body,
+            recipient=recipient,
+            transport_id=transport.transport_id,
+            reason="Synthetic discussion",
+        )
+        action = self.prepare(proposal)
+        return self.store.execute(action, proposal, review_call_id=await self.review(action))
 
     async def test_publish_revise_withdraw_and_actual_receipt_without_human_approval(self) -> None:
         proposal = self.article()
@@ -253,6 +296,11 @@ class ExpressionStoreTestCase(unittest.IsolatedAsyncioTestCase):
             transport_id=second.transport_id,
             reason="Start a conversation",
         )
+        # Another account's authorization cannot approve this recipient on the selected account.
+        self.authorize_contact(first, "another-subject")
+        with self.assertRaises(OutreachDenied):
+            self.prepare(proposal)
+        self.authorize_contact(second, "another-subject")
         action = self.prepare(proposal)
         receipt = self.store.execute(action, proposal, review_call_id=await self.review(action))
         self.assertEqual(receipt["status"], "queued")
@@ -300,11 +348,18 @@ class ExpressionStoreTestCase(unittest.IsolatedAsyncioTestCase):
             transport_id=transport.transport_id,
             reason="Conversation",
         )
+        self.authorize_contact(transport, "target-subject")
         action = self.prepare(proposal)
         self.store.execute(action, proposal, review_call_id=await self.review(action))
         calls: list[str] = []
 
         async def success(request: httpx.Request) -> httpx.Response:
+            payload = json.loads(request.content)
+            self.assertEqual(payload["conversation_id"], "target-subject")
+            self.assertIn("Noyra, an AI system", payload["text"])
+            self.assertIn("Fixture Operator", payload["text"])
+            self.assertIn("stop@example.com", payload["text"])
+            self.assertTrue(payload["text"].endswith(proposal.body))
             calls.append(str(request.url))
             return httpx.Response(200, json={"ok": True, "message_id": "remote-one"})
 
@@ -329,6 +384,129 @@ class ExpressionStoreTestCase(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(results[0].status, "unknown")
             self.assertEqual(await dispatcher.deliver_pending(self.subject), [])
             self.assertEqual(len(calls), 2)
+            await dispatcher.aclose()
+
+    async def test_outreach_revocation_fences_draft_and_queue_after_reauthorization(self) -> None:
+        transport = self.transports.configure(
+            self.subject,
+            TransportInput(
+                channel="webhook", label="outreach", endpoint="https://mock.example/send"
+            ),
+            actor="operator",
+        )
+        recipient = "known-recipient"
+        self.authorize_contact(transport, recipient)
+        receipt = await self.queue_contact(transport, recipient, "Old queue")
+        proposal = ExpressionProposal(
+            operation="message",
+            transport_id=transport.transport_id,
+            recipient=recipient,
+            body="Old draft",
+            reason="Synthetic contact",
+        )
+        action = self.prepare(proposal)
+        approval = await self.review(action)
+        requests: list[httpx.Request] = []
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(200, json={"message_id": "sent"})
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            dispatcher = DeliveryDispatcher(self.db, self.transports, client=client)
+            self.assertEqual(dispatcher.enqueue_pending(self.subject), 1)
+            revoked = self.revoke_contact(transport, recipient)
+            self.assertEqual(self.revoke_contact(transport, recipient), revoked)
+            with self.assertRaises(OutreachDenied):
+                self.authorize_contact(transport, recipient)
+            self.authorize_contact(transport, recipient, expected=revoked)
+            with self.assertRaises(OutreachDenied):
+                self.store.execute(action, proposal, review_call_id=approval)
+            with self.db.read_transaction() as connection:
+                self.assertEqual(
+                    connection.execute(
+                        "SELECT status FROM actions WHERE action_id=?", (action,)
+                    ).fetchone()[0],
+                    "cancelled",
+                )
+            stopped = (await dispatcher.deliver_pending(self.subject))[0]
+            self.assertEqual(stopped.interaction_id, receipt["interaction_id"])
+            self.assertEqual(stopped.status, "failed")
+            self.assertEqual(requests, [])
+            self.assertEqual(await dispatcher.deliver_pending(self.subject), [])
+            await self.queue_contact(transport, recipient, "New authorization")
+            self.assertEqual(
+                (await dispatcher.deliver_pending(self.subject))[0].status, "delivered"
+            )
+            self.assertEqual(len(requests), 1)
+            await dispatcher.aclose()
+
+    async def test_recipient_revoked_at_send_boundary_never_hits_mock_transport(self) -> None:
+        transport = self.transports.configure(
+            self.subject,
+            TransportInput(
+                channel="webhook", label="outreach", endpoint="https://mock.example/send"
+            ),
+            actor="operator",
+        )
+        recipient = "consenting-recipient"
+        self.authorize_contact(transport, recipient)
+        await self.queue_contact(transport, recipient, "Queued message")
+
+        def unexpected(_: httpx.Request) -> httpx.Response:
+            self.fail("revoked recipient reached the transport")
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(unexpected)) as client:
+            dispatcher = DeliveryDispatcher(self.db, self.transports, client=client)
+            original = dispatcher._provider_credentials
+
+            async def revoke_during_preflight(*args: Any, **kwargs: Any) -> dict[str, Any]:
+                result = await original(*args, **kwargs)
+                self.revoke_contact(transport, recipient)
+                return result
+
+            with patch.object(dispatcher, "_provider_credentials", revoke_during_preflight):
+                stopped = (await dispatcher.deliver_pending(self.subject))[0]
+            self.assertEqual(stopped.status, "failed")
+            self.assertGreaterEqual(stopped.attempts, 3)
+            self.assertEqual(await dispatcher.deliver_pending(self.subject), [])
+            await dispatcher.aclose()
+
+    async def test_unversioned_outbox_is_never_automatically_migrated(self) -> None:
+        transport = self.transports.configure(
+            self.subject,
+            TransportInput(channel="webhook", label="legacy", endpoint="https://mock.example/send"),
+            actor="operator",
+        )
+        self.authorize_contact(transport, "legacy-recipient")
+        original = self.store.events._append_connection
+
+        def append_legacy(
+            connection: Any,
+            subject: str,
+            event_type: str,
+            source: str,
+            payload: dict[str, Any],
+            **kwargs: Any,
+        ) -> Any:
+            if event_type == "expression_outbox":
+                payload = dict(payload)
+                payload.pop("authorization_id")
+            return original(connection, subject, event_type, source, payload, **kwargs)
+
+        with patch.object(self.store.events, "_append_connection", append_legacy):
+            await self.queue_contact(transport, "legacy-recipient", "Legacy fixture")
+        self.assertEqual(self.store.verify_integrity(), 1)
+        requests: list[httpx.Request] = []
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(200)
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            dispatcher = DeliveryDispatcher(self.db, self.transports, client=client)
+            self.assertEqual((await dispatcher.deliver_pending(self.subject))[0].status, "failed")
+            self.assertEqual(requests, [])
             await dispatcher.aclose()
 
     async def test_publication_rechecks_revocation_inside_transaction(self) -> None:
@@ -445,6 +623,7 @@ class ExpressionStoreTestCase(unittest.IsolatedAsyncioTestCase):
             transport_id=transport.transport_id,
             reason="Discussion",
         )
+        self.authorize_contact(transport, "correspondent")
         action = self.prepare(proposal)
         sent = self.store.execute(action, proposal, review_call_id=await self.review(action))
         provider_message_ids = iter(("remote-c0", "remote-c1"))
@@ -479,7 +658,8 @@ class ExpressionStoreTestCase(unittest.IsolatedAsyncioTestCase):
                 ).fetchone()[0]
             self.assertEqual(linked, sent["interaction_id"])
             history = ParticipantStore(self.db).history(self.subject, reply.interaction_id)
-            self.assertEqual([item["content"] for item in history], [proposal.body])
+            opening = InteractionStore(self.db).get(sent["interaction_id"]).content
+            self.assertEqual([item["content"] for item in history], [opening])
             InteractionStore(self.db).decide(
                 reply.interaction_id,
                 InteractionDecision(disposition="accepted", rationale="Continue the discussion"),
@@ -517,7 +697,7 @@ class ExpressionStoreTestCase(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 [item["content"] for item in second_history],
                 [
-                    proposal.body,
+                    opening,
                     "Here is a suggestion for your question.",
                     "I compared the source. What do you think of this follow-up?",
                 ],
@@ -614,6 +794,7 @@ class ExpressionStoreTestCase(unittest.IsolatedAsyncioTestCase):
             recipient="helper@example.com",
             reason="A subject-chosen discussion",
         )
+        self.authorize_contact(transport, "helper@example.com")
         action = self.prepare(proposal)
         receipt = self.store.execute(action, proposal, review_call_id=await self.review(action))
         return transport, receipt
@@ -665,7 +846,7 @@ class ExpressionStoreTestCase(unittest.IsolatedAsyncioTestCase):
                 pass
 
         transport, receipt = await self._direct_contact("email")
-        expected = ["An initial public question."]
+        expected = [InteractionStore(self.db).get(receipt["interaction_id"]).content]
         parent = receipt["interaction_id"]
         with (
             patch("noyra.interaction.transport.smtplib.SMTP", SMTP),
@@ -858,7 +1039,7 @@ class ExpressionStoreTestCase(unittest.IsolatedAsyncioTestCase):
                 row["content"]
                 for row in ParticipantStore(self.db).history(self.subject, accepted.interaction_id)
             ],
-            ["An initial public question."],
+            [InteractionStore(self.db).get(receipt["interaction_id"]).content],
         )
 
     async def test_parallel_first_replies_bind_one_private_conversation(self) -> None:
@@ -923,7 +1104,7 @@ class ExpressionStoreTestCase(unittest.IsolatedAsyncioTestCase):
                         self.subject, first.interaction_id
                     )
                 ],
-                ["An initial public question."],
+                [InteractionStore(self.db).get(first_receipt["interaction_id"]).content],
             )
             self.assertEqual(
                 [
@@ -932,7 +1113,7 @@ class ExpressionStoreTestCase(unittest.IsolatedAsyncioTestCase):
                         self.subject, second.interaction_id
                     )
                 ],
-                [proposal.body],
+                [InteractionStore(self.db).get(second_receipt["interaction_id"]).content],
             )
             with self.db.connection() as connection:
                 links = connection.execute(

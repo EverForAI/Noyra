@@ -28,17 +28,17 @@ A subject action cannot edit an operator-authored document or another instance's
 
 ## Sustained consent and limits
 
-The runtime manages an instance-scoped publication grant and grants for configured active message
-transports. A configured transport is the operator-provided Noyra sending identity; configure a
+The runtime manages an instance-scoped publication grant and grants for active message transports
+with eligible recipients. A configured transport is the operator-provided Noyra sending identity; configure a
 dedicated Noyra identity rather than borrowing a person's identity or credentials. The subject
 cannot create arbitrary capabilities from a draft. Publication and message grants enforce rolling
 hourly limits and are revalidated before committing or sending.
 
 Cognition is opt-in (`NOYRA_COGNITION_ENABLED=false` in both templates). The expression
 setting below defaults on once cognition is enabled. Public HTTPS reading remains open
-by default; optional host/recipient allowlists do not become mandatory approval queues.
-Configured active transports allow autonomous expression unless their `autonomous_send`
-setting is false. A transport's optional `allowed_recipients` narrows only that transport.
+by default. General autonomous outreach is off for each recipient until an operator records
+that recipient's opt-in for the exact transport. `autonomous_send` and `allowed_recipients`
+can narrow that permission; neither supplies it. Individual messages need no further human approval.
 Disabling new expression work does not retract already queued messages; disable the
 transport or revoke its grant to prevent their dispatch.
 
@@ -57,11 +57,12 @@ model token/cost limits and runtime lease fencing still apply. No new schema mig
 
 ## Contact, delivery and identity
 
-A message draft fixes its transport ID and recipient. Its private outbox record binds those values
-to the action and charged capability. The existing delivery dispatcher selects that exact account
-and rechecks the grant, transport status, recipient and settings before sending. A queued message
-is not called delivered. Provider outcomes are recorded separately; unknown delivery is not
-repeated automatically. Disabling a transport or revoking its capability stops an unsent message.
+A general outreach draft binds its transport ID, recipient and authorization generation. The
+outbox retains that generation and prefixes the message with system-written AI identification,
+the responsible operator's public name and a monitored opt-out email. The dispatcher checks the
+saved generation, notice, grant and route before sending. Revocation stops unsent messages; a fresh
+authorization cannot revive an older draft or queue entry. No check can recall provider-accepted
+messages. Unknown outcomes remain unknown and are not repeated automatically.
 For direct email/webhook replies carrying an exact provider message reference, configured
 `settings.account_id` identifies the Noyra receiving account. Matching transport, account and
 recipient can link the reply to the original proactive message and provide that thread's history.
@@ -75,11 +76,48 @@ never borrows another account's conversation history.
 
 Transport settings support optional restrictions:
 
-- `autonomous_send=false` disables autonomous initiation on that transport; normal default is true.
-- `allowed_recipients` is an optional comma-separated recipient scope; absent/empty means no
-  recipient whitelist. It does not grant another account's private history.
+- `autonomous_send=false` blocks general outreach even to opted-in recipients.
+- `allowed_recipients` is an optional comma-separated upper bound, not evidence of opt-in.
+- A configured fixed destination (`recipient`, `chat_id`, `target` or `to`) also bounds general
+  outreach. Feishu custom webhooks must have a fixed destination attested by the operator;
+  Feishu app transports can use `delivery_mode=app` for individually addressed outreach.
 - `require_known_senders=true` restricts new inbound sources to operator-bound senders; the
   normal default is false.
+
+### Operator rollout and opt-out
+
+1. Before enabling general outreach, inspect `GET /api/config/transports/outreach` with operator
+   authorization. It is read-only and returns counts, not recipient identities or credentials.
+   Existing transports and allowlists are not converted into consent. Old unversioned drafts
+   and unsent outbox entries cannot send; start new drafts after recording opt-in. No database
+   schema migration or transport recreation is required for an active compatible route.
+2. Record opt-in with `POST /api/config/transports/{transport_id}/outreach` using JSON:
+
+   ```json
+   {
+     "operation": "authorize",
+     "recipient": "recipient@example.com",
+     "confirm_opt_in": true,
+     "operator_name": "Example operator",
+     "opt_out_email": "stop@example.com",
+     "reason": "Record of recipient opt-in"
+   }
+   ```
+
+   The operator must verify the destination and retain the opt-in evidence outside the message
+   system. The app records the operator's attestation, not an independent mailbox challenge.
+   The draft model sees eligible recipient identifiers; include that disclosure in the opt-in.
+   Do not use private operator contact details or put personal evidence in `reason`.
+3. Monitor the stated contact mailbox. When a recipient declines or opts out, submit the same
+   endpoint with `operation: "revoke"`, the exact recipient and a reason. Repeating the revoke
+   is safe and returns the revoked authorization ID. Do not reauthorize without fresh opt-in;
+   a new authorization for an existing entry requires `expected_authorization_id` equal to its
+   current ID. Save the response ID for operator administration. Each transport supports 32
+   entries, including durable opt-outs; no automatic expiry or reactivation is applied.
+
+This endpoint manages general autonomous outreach only. It does not change authenticated replies,
+private conversation notifications, relationship-specific controls or project help routed to an
+operator-configured destination. Those paths retain their own source, consent and route checks.
 
 Inbound platform authentication and signature verification remain required. New authenticated
 sources receive participant status only, even if the payload claims to be the creator. A revoked

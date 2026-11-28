@@ -131,14 +131,18 @@ def test_public_schema_has_fixed_reviewed_fingerprints(
     archive: tuple[PublicArchive, SubjectKernel],
 ) -> None:
     _, kernel = archive
-    # Reviewed whole-database schema 118, not only archive tables. Versions
+    # Reviewed whole-database schema 125, including non-archive tables. Versions
     # 108-112 add acquisition state, its immutable-cache guard, an agenda
     # revision index, append-only thought-round closures and bounded scheduling state.
     # v113 adds explicit email identity versions and per-event mailbox evidence.
     # v114 adds bounded lookup indexes; v115-v116 add immutable workflow
     # export acceptance and increment-parent metadata. v117 replaces workflow
-    # publication guards; v118 adds publisher-scoped knowledge trust. Public
-    # archive tables retain their contract. Keep independent literal values,
+    # publication guards; v118 adds publisher-scoped knowledge trust and v119
+    # adds a bounded runtime-observation index. v120 guards reflection erasure;
+    # v121 gates memory-integration reason redaction on privacy receipts.
+    # v122-v123 record memory-block revision lineage. v124-v125 add
+    # receipt-bound redaction for memory blocks and entity graphs.
+    # Keep independent literals for the whole database fingerprints,
     # never derive the expectation from the implementation's fingerprint registry.
     with kernel.database.connection() as connection:
         assert (
@@ -146,15 +150,15 @@ def test_public_schema_has_fixed_reviewed_fingerprints(
                 "SELECT value FROM schema_meta WHERE key='schema_version'"
             ).fetchone()[0]
             == str(CURRENT_SCHEMA_VERSION)
-            == "118"
+            == "125"
         )
         assert (
             kernel.database.schema_ddl_fingerprint(connection)
-            == "f7c40fc2ed563822434454c0af0a3e44a4d6c40babb1a6b861830af91180716d"
+            == "1aba05bf9fe7352da25714062ef8653795fd34a85b648b955c9e8f03153118a6"
         )
         assert (
             kernel.database.schema_structure_fingerprint(connection)
-            == "444938463a1ba013c3e7083fcb8ef55419fee5d17c459528ae6e25de6cab3b26"
+            == "712899cb5719568a995418cd14be9e497769cd0d7d8807dae815e6f1f6a1e333"
         )
 
 
@@ -810,15 +814,16 @@ def test_cold_segment_pages_continue_without_skips_or_filtered_false_end(
         ]
         assert set(ids) <= {item["id"] for item in items}
         assert len(items) == len({(item["kind"], item["id"]) for item in items})
-        from noyra.interaction.public_archive import _COLD_READ_SLOTS, PublicQueryBudgetExceeded
+        from noyra.interaction.public_archive import PublicQueryBudgetExceeded
+        from noyra.interaction.public_cold_reader import COLD_READ_SLOTS
 
-        assert _COLD_READ_SLOTS.acquire(False) and _COLD_READ_SLOTS.acquire(False)
+        assert COLD_READ_SLOTS.acquire(False) and COLD_READ_SLOTS.acquire(False)
         try:
             with pytest.raises(PublicQueryBudgetExceeded, match="admission"):
                 store.page(kernel.subject_id, kind="lifecycle", identifier=ids[0])
         finally:
-            _COLD_READ_SLOTS.release()
-            _COLD_READ_SLOTS.release()
+            COLD_READ_SLOTS.release()
+            COLD_READ_SLOTS.release()
         assert store.page(kernel.subject_id, kind="lifecycle", identifier=ids[0])["items"]
     finally:
         kernel.close()

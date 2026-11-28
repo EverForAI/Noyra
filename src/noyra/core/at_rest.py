@@ -10,6 +10,7 @@ they remain encrypted after leaving that volume.
 from __future__ import annotations
 
 import base64
+import errno
 import hashlib
 import json
 import os
@@ -61,6 +62,9 @@ _MAX_CHUNK_BYTES = 8 * 1024 * 1024
 _MAX_ATTESTATION_LIFETIME = timedelta(hours=24)
 # Recursive ACL work includes PowerShell startup and filesystem latency.
 _WINDOWS_ACL_TIMEOUT_SECONDS = 60
+_PERMISSION_SNAPSHOT_MAX_AGE_SECONDS = 5.0
+_PERMISSION_SCAN_BUDGET_SECONDS = 4.0
+_PERMISSION_SCAN_INTERVAL_SECONDS = 1.0
 _POSIX_LOST_FOUND_NAME = "lost+found"
 _KEY_ID_CHARACTERS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
 _KEY_ID_START_CHARACTERS = frozenset(
@@ -561,6 +565,53 @@ $volume = Get-BitLockerVolume -MountPoint $drive
         )
 
 
+def _permission_audit_transient_reason(error: BaseException | str) -> str | None:
+    """Map only incomplete scans and resource contention to retryable failures."""
+    current: BaseException | None = error if isinstance(error, BaseException) else None
+    visited: set[int] = set()
+    while current is not None and id(current) not in visited:
+        visited.add(id(current))
+        if isinstance(current, (TimeoutError, subprocess.TimeoutExpired)):
+            return "private permission audit timed out"
+        if isinstance(current, OSError):
+            if current.errno == errno.ETIMEDOUT:
+                return "private permission audit timed out"
+            if current.errno in {errno.EBUSY, errno.EAGAIN}:
+                return "private permission audit is busy"
+        current = current.__cause__ or current.__context__
+
+    detail = str(error).casefold()
+    if (
+        detail.startswith("private permission audit exceeds its work budget")
+        or detail.startswith(
+            "windows private-storage acl check failed: windows acl audit timed out"
+        )
+        or detail.startswith("private storage metadata timed out")
+    ):
+        return "private permission audit timed out"
+    if detail.startswith(
+        (
+            "private storage metadata is busy",
+            "private permission audit is busy",
+            "windows private-storage acl check failed: acl probe busy",
+        )
+    ):
+        return "private permission audit is busy"
+    if detail.startswith("windows private-storage acl check failed: acl audit timed out"):
+        return "private permission audit timed out"
+    if detail.startswith(
+        (
+            "private storage metadata is unavailable",
+            "private storage cannot be enumerated",
+            "windows private-storage acl check failed: acl probe unavailable",
+            "windows private-storage acl check failed: acl command failed",
+            "windows private-storage acl check failed: acl response is invalid",
+        )
+    ):
+        return "private permission audit scan failed"
+    return None
+
+
 class AtRestGuard:
     """Prepare and continuously report the runtime's at-rest boundary."""
 
@@ -574,9 +625,11 @@ class AtRestGuard:
         self._volume: VolumeEncryptionStatus | None = None
         self._prepared = False
         self._permission_lock = threading.Lock()
+        self._permission_scan_lock = threading.Lock()
         self._permission_stop = threading.Event()
         self._permission_thread: threading.Thread | None = None
         self._permission_snapshot: tuple[tuple[int, ...], float, str | None] | None = None
+        self._permission_audit_failure: tuple[float, str] | None = None
 
     @property
     def required(self) -> bool:
@@ -590,7 +643,7 @@ class AtRestGuard:
         _harden_private_paths(self.data_root)
         self._require_volume()
         self._require_keyring()
-        permission_error = _private_permission_error(self.data_root)
+        permission_error = self._audit_private_permissions()
         if permission_error is not None:
             raise AtRestError(permission_error)
         if os.name != "nt":
@@ -601,13 +654,9 @@ class AtRestGuard:
         if not self.required:
             return
         _harden_private_paths(self.data_root)
-        checked_at = time.monotonic()
-        signature = self._permission_root_signature()
-        permission_error = _private_permission_error(self.data_root)
+        permission_error = self._audit_private_permissions()
         if permission_error is not None:
             raise AtRestError(permission_error)
-        with self._permission_lock:
-            self._permission_snapshot = (signature, checked_at, None)
 
     def require_ready(self) -> dict[str, Any]:
         if not self.required:
@@ -616,7 +665,7 @@ class AtRestGuard:
             raise AtRestError("at-rest guard was not prepared")
         self._require_volume()
         keyring = self._require_keyring()
-        permission_error = _private_permission_error(self.data_root)
+        permission_error = self._audit_private_permissions()
         if permission_error is not None:
             raise AtRestError(permission_error)
         return self._health_payload(True, None, keyring)
@@ -640,7 +689,7 @@ class AtRestGuard:
         try:
             self._require_volume()
             keyring = self._require_keyring()
-            permission_error = _private_permission_error(self.data_root)
+            permission_error = self._audit_private_permissions()
             if permission_error is not None:
                 raise AtRestError(permission_error)
             return self._health_payload(True, None, keyring)
@@ -666,8 +715,9 @@ class AtRestGuard:
         """HTTP readiness with a fail-closed, five-second permission snapshot.
 
         Volume/key checks remain live. A single background reader refreshes
-        permissions; expired, changed-root and incomplete scans never authorize
-        requests. Direct health()/require_ready() remain strict full checks.
+        permissions; only an unexpired successful scan authorizes requests.
+        Failed refreshes never extend that proof. Direct health()/require_ready()
+        remain strict full checks.
         """
         if not self.required:
             return self.health()
@@ -686,12 +736,25 @@ class AtRestGuard:
                     )
                     self._permission_thread.start()
                 snapshot = self._permission_snapshot
-            if snapshot is None or snapshot[0] != signature or time.monotonic() - snapshot[1] > 5.0:
-                raise AtRestError("private permission audit is pending or expired")
+                audit_failure = self._permission_audit_failure
+            if snapshot is None:
+                reason = (
+                    "private permission audit is pending"
+                    if audit_failure is None
+                    else audit_failure[1]
+                )
+                raise AtRestError(reason)
+            if snapshot[0] != signature:
+                raise AtRestError("private storage root changed since audit")
+            if time.monotonic() - snapshot[1] > _PERMISSION_SNAPSHOT_MAX_AGE_SECONDS:
+                reason = "private permission audit is pending or expired"
+                if audit_failure is not None and audit_failure[0] >= snapshot[1]:
+                    reason = audit_failure[1]
+                raise AtRestError(reason)
             if snapshot[2] is not None:
                 raise AtRestError(snapshot[2])
             payload = self._health_payload(True, None, keyring)
-            payload["permissions"]["max_age_seconds"] = 5
+            payload["permissions"]["max_age_seconds"] = int(_PERMISSION_SNAPSHOT_MAX_AGE_SECONDS)
             return payload
         except Exception as error:
             return self._health_payload(False, str(error), None)
@@ -702,20 +765,84 @@ class AtRestGuard:
             raise AtRestError(str(health.get("reason", "at-rest boundary unavailable")))
         return health
 
+    def _audit_private_permissions(
+        self,
+        *,
+        work_budget_seconds: float | None = None,
+        wait_for_scan: bool = True,
+    ) -> str | None:
+        """Run one permission audit without overlapping filesystem traversals.
+
+        A completed unsafe scan replaces the last proof immediately. A timeout,
+        transient filesystem error, or scan collision does not erase a still-
+        fresh successful proof; that proof is still bounded by its original
+        start time and is never extended by a failed refresh.
+        """
+        if wait_for_scan:
+            self._permission_scan_lock.acquire()
+        elif not self._permission_scan_lock.acquire(blocking=False):
+            self._record_permission_audit_failure("private permission audit is busy")
+            return "private permission audit is busy"
+
+        checked_at = time.monotonic()
+        signature: tuple[int, ...] | None = None
+        try:
+            signature = self._permission_root_signature()
+            deadline = None if work_budget_seconds is None else checked_at + work_budget_seconds
+            permission_error = _private_permission_error(self.data_root, deadline=deadline)
+            if signature != self._permission_root_signature():
+                self._invalidate_permission_snapshot("private storage root changed during audit")
+                return "private storage root changed during audit"
+            if permission_error is None:
+                with self._permission_lock:
+                    self._permission_snapshot = (signature, checked_at, None)
+                    self._permission_audit_failure = None
+                return None
+            transient_reason = _permission_audit_transient_reason(permission_error)
+            if transient_reason is not None:
+                self._record_permission_audit_failure(transient_reason)
+                return transient_reason
+            with self._permission_lock:
+                self._permission_snapshot = (signature, checked_at, permission_error)
+                self._permission_audit_failure = None
+            return permission_error
+        except Exception as error:
+            reason = _permission_audit_transient_reason(error)
+            if reason is not None:
+                self._record_permission_audit_failure(reason)
+                return reason
+            if isinstance(error, AtRestError):
+                detail = str(error)
+                if "root changed during audit" in detail:
+                    self._invalidate_permission_snapshot(detail)
+                    return detail
+                if signature is not None:
+                    with self._permission_lock:
+                        self._permission_snapshot = (signature, checked_at, detail)
+                        self._permission_audit_failure = None
+                    return detail
+            reason = "private permission audit scan failed"
+            self._record_permission_audit_failure(reason)
+            return reason
+        finally:
+            self._permission_scan_lock.release()
+
+    def _record_permission_audit_failure(self, reason: str) -> None:
+        with self._permission_lock:
+            self._permission_audit_failure = (time.monotonic(), reason)
+
+    def _invalidate_permission_snapshot(self, reason: str) -> None:
+        with self._permission_lock:
+            self._permission_snapshot = None
+            self._permission_audit_failure = (time.monotonic(), reason)
+
     def _monitor_permissions(self) -> None:
         while not self._permission_stop.is_set():
-            checked_at = time.monotonic()
-            try:
-                signature = self._permission_root_signature()
-                error = _private_permission_error(self.data_root, deadline=checked_at + 4.0)
-                if signature != self._permission_root_signature():
-                    raise AtRestError("private storage root changed during audit")
-                with self._permission_lock:
-                    self._permission_snapshot = (signature, checked_at, error)
-            except Exception:
-                with self._permission_lock:
-                    self._permission_snapshot = None
-            self._permission_stop.wait(1.0)
+            self._audit_private_permissions(
+                work_budget_seconds=_PERMISSION_SCAN_BUDGET_SECONDS,
+                wait_for_scan=False,
+            )
+            self._permission_stop.wait(_PERMISSION_SCAN_INTERVAL_SECONDS)
 
     def close(self) -> None:
         self._permission_stop.set()
@@ -1526,6 +1653,10 @@ def _private_permission_error(data_root: Path, *, deadline: float | None = None)
     try:
         root_device = data_root.stat().st_dev
     except OSError as error:
+        if error.errno in {errno.EBUSY, errno.EAGAIN}:
+            return "private storage metadata is busy"
+        if error.errno == errno.ETIMEDOUT:
+            return "private storage metadata timed out"
         return f"private storage metadata is unavailable: {type(error).__name__}"
     for count, path in enumerate(_private_paths(data_root), 1):
         if deadline is not None and (time.monotonic() >= deadline or count > 100_000):
@@ -1535,6 +1666,10 @@ def _private_permission_error(data_root: Path, *, deadline: float | None = None)
         try:
             stat = path.stat()
         except OSError as error:
+            if error.errno in {errno.EBUSY, errno.EAGAIN}:
+                return "private storage metadata is busy"
+            if error.errno == errno.ETIMEDOUT:
+                return "private storage metadata timed out"
             return f"private storage metadata is unavailable: {type(error).__name__}"
         # A nested mount/junction is a separate trust boundary.  It must be
         # attested independently; accepting it would let a private root span
@@ -2125,6 +2260,11 @@ foreach ($item in $targets) {{
     except subprocess.TimeoutExpired as error:
         return False, f"Windows ACL audit timed out after {error.timeout:g} seconds"
     except (OSError, json.JSONDecodeError) as error:
+        if isinstance(error, OSError):
+            if error.errno == errno.ETIMEDOUT:
+                return False, "ACL audit timed out"
+            if error.errno in {errno.EBUSY, errno.EAGAIN}:
+                return False, "ACL probe busy"
         return False, f"ACL probe unavailable: {type(error).__name__}"
     if not isinstance(payload, dict):
         return False, "ACL response is invalid"

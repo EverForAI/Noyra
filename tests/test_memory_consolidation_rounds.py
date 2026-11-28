@@ -12,6 +12,7 @@ import pytest
 
 from noyra.core import Database, EventStore, IdentityStore
 from noyra.core.errors import IntegrityError
+from noyra.core.source_provenance import MAX_SOURCE_EVENT_IDS
 from noyra.core.types import content_hash
 from noyra.mind import MemoryConsolidator, MemoryStore
 from noyra.mind.types import MemoryRecord
@@ -114,6 +115,33 @@ def used_memory(case: Case) -> MemoryRecord:
             case.subject, "repeatedly useful", context_type="synthetic", context_id=str(index)
         )
     return value
+
+
+def test_consolidation_preserves_full_source_list(case: Case) -> None:
+    events = EventStore(case.database)
+    sources = tuple(
+        events.append(case.subject, "experience", "synthetic", {"sequence": index}).event_id
+        for index in range(MAX_SOURCE_EVENT_IDS)
+    )
+    store = MemoryStore(case.database, clock=case.clock)
+    value = store.create(
+        case.subject,
+        "semantic",
+        "A repeatedly useful memory.",
+        salience=0.5,
+        confidence=0.8,
+        source_event_ids=sources,
+    )
+    for index in range(3):
+        store.recall(
+            case.subject, "repeatedly useful", context_type="synthetic", context_id=str(index)
+        )
+    assert case.worker().run_due() == "memory_consolidation_committed"
+    assert store.source_event_ids(value.memory_id) == sources
+    assert store.consolidation_history(case.subject)[0].strengthened_memory_ids == (
+        value.memory_id,
+    )
+    store.verify_lifecycle_integrity(case.subject)
 
 
 def test_interval_boundary_restart_and_clock_rollback_do_not_repeat_writes(case: Case) -> None:

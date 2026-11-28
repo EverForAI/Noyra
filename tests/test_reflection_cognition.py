@@ -7,6 +7,8 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Self
 
+from pydantic import ValidationError
+
 from noyra.cognition import (
     CognitionSettings,
     ReflectionCognitionPending,
@@ -14,6 +16,7 @@ from noyra.cognition import (
     SleepReflectionCognition,
 )
 from noyra.core import EventStore, SubjectKernel
+from noyra.core.errors import IntegrityError
 from noyra.core.types import content_hash
 from noyra.mind import BeliefStore, GoalCandidate, GoalStore, MemoryStore
 from noyra.model import (
@@ -21,11 +24,13 @@ from noyra.model import (
     FakeProvider,
     ModelGateway,
     ModelLedger,
+    ModelMessage,
     ModelPricing,
     ModelUsage,
     ProviderResponse,
     RetryPolicy,
 )
+from noyra.model.request_identity import business_request_key
 from noyra.sleep import (
     PersonalityCandidateInput,
     SleepBeliefRevision,
@@ -34,6 +39,7 @@ from noyra.sleep import (
     SleepReflectionPlan,
     SleepRetryBlock,
 )
+from noyra.sleep.types import SleepReflectionProposal
 
 
 class ReflectionCognitionTestCase(unittest.IsolatedAsyncioTestCase):
@@ -106,12 +112,11 @@ class ReflectionCognitionTestCase(unittest.IsolatedAsyncioTestCase):
         self.kernel.close()
         self.temp_dir.cleanup()
 
-    def settings(self: Self, *, max_calls: int = 3, max_active: int = 3) -> CognitionSettings:
+    def settings(self: Self, *, max_calls: int = 3) -> CognitionSettings:
         return CognitionSettings(
             enabled=False,
             max_sleep_model_calls_per_run=max_calls,
             max_sleep_context_chars=60_000,
-            max_active_goals=max_active,
         )
 
     def cognition(
@@ -119,7 +124,6 @@ class ReflectionCognitionTestCase(unittest.IsolatedAsyncioTestCase):
         provider: FakeProvider,
         *,
         max_calls: int = 3,
-        max_active: int = 3,
         limits: BudgetLimits | None = None,
     ) -> SleepReflectionCognition:
         gateway = ModelGateway(
@@ -134,7 +138,7 @@ class ReflectionCognitionTestCase(unittest.IsolatedAsyncioTestCase):
             self.kernel.database,
             self.subject_id,
             gateway,
-            self.settings(max_calls=max_calls, max_active=max_active),
+            self.settings(max_calls=max_calls),
         )
 
     def proposal(self: Self, *, event_id: str | None = None) -> str:
@@ -150,17 +154,6 @@ class ReflectionCognitionTestCase(unittest.IsolatedAsyncioTestCase):
                         "salience": 0.75,
                         "confidence": 0.65,
                         "source_event_ids": [source],
-                    }
-                ],
-                "goal_revisions": [
-                    {
-                        "goal_id": self.goal.goal_id,
-                        "status": "active",
-                        "priority": 0.75,
-                        "commitment": 0.65,
-                        "progress": 0.1,
-                        "emotional_pressure": 0.1,
-                        "reason": "the inquiry remains supported after reflection",
                     }
                 ],
                 "personality_candidates": [
@@ -182,17 +175,23 @@ class ReflectionCognitionTestCase(unittest.IsolatedAsyncioTestCase):
         )
         cognition = self.cognition(provider)
         plan = await cognition.propose(self.sleep_run)
-        recovered = await cognition.propose(self.sleep_run)
+        recovered = await self.cognition(provider).propose(self.sleep_run)
         self.assertEqual(recovered, plan)
         self.assertEqual(len(provider.requests), 1)
         system_message, context_message = provider.requests[0].messages
         self.assertIn("untrusted data", system_message.content)
+        self.assertIn("Goals are read-only context", system_message.content)
+        self.assertIn(self.goal.goal_id, context_message.content)
+        self.assertNotIn("goal_revisions", provider.requests[0].output_schema["properties"])
         self.assertIn("BEGIN_UNTRUSTED_REFLECTION_CONTEXT", context_message.content)
         self.assertNotIn("must-not-leak", context_message.content)
         self.assertIn(self.evidence[0], context_message.content)
 
+        goals = GoalStore(self.kernel.database)
+        history = goals.revisions(self.goal.goal_id)
         self.sleep.commit_reflection(self.sleep_run.sleep_id, plan)
-        self.assertEqual(GoalStore(self.kernel.database).get(self.goal.goal_id).status, "active")
+        self.assertEqual(goals.get(self.goal.goal_id), self.goal)
+        self.assertEqual(goals.revisions(self.goal.goal_id), history)
         memories = MemoryStore(self.kernel.database).search(self.subject_id)
         self.assertEqual(len(memories), 1)
         self.assertIn("recurring pattern", memories[0].content)
@@ -242,7 +241,7 @@ class ReflectionCognitionTestCase(unittest.IsolatedAsyncioTestCase):
             await cognition.propose(self.sleep_run)
         plan = await cognition.propose(self.sleep_run)
         self.assertEqual(len(provider.requests), 2)
-        self.assertEqual(plan.goal_revisions[0].goal_id, self.goal.goal_id)
+        self.assertEqual(plan.memories[0].source_event_ids, (self.evidence[0],))
 
     async def test_provider_failure_reaches_bounded_fallback(self: Self) -> None:
         provider = FakeProvider([])
@@ -309,42 +308,6 @@ class ReflectionCognitionTestCase(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ReflectionCognitionValidationError):
             cognition._validate(
                 SleepReflectionPlan(
-                    summary="A forged goal must not be revised.",
-                    goal_revisions=(
-                        SleepGoalRevision(
-                            goal_id="goal_forged",
-                            status="active",
-                            priority=0.5,
-                            commitment=0.5,
-                            progress=0,
-                            emotional_pressure=0,
-                            reason="forged goal",
-                        ),
-                    ),
-                ),
-                context,
-            )
-        with self.assertRaises(ReflectionCognitionValidationError):
-            cognition._validate(
-                SleepReflectionPlan(
-                    summary="An invalid goal transition must not be committed.",
-                    goal_revisions=(
-                        SleepGoalRevision(
-                            goal_id=self.goal.goal_id,
-                            status="paused",
-                            priority=0.5,
-                            commitment=0.5,
-                            progress=0,
-                            emotional_pressure=0,
-                            reason="candidate goals cannot become paused",
-                        ),
-                    ),
-                ),
-                context,
-            )
-        with self.assertRaises(ReflectionCognitionValidationError):
-            cognition._validate(
-                SleepReflectionPlan(
                     summary="A belief revision needs in-window evidence.",
                     belief_revisions=(
                         SleepBeliefRevision(
@@ -376,38 +339,124 @@ class ReflectionCognitionTestCase(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             await cognition.propose(replace(self.sleep_run, status="deep_sleep"))
 
-    async def test_reflection_cannot_bypass_active_goal_limit(self: Self) -> None:
-        second = GoalStore(self.kernel.database).create_candidate(
-            self.subject_id,
-            GoalCandidate(
-                title="A second sleep direction",
-                description="This direction must respect the shared active-goal limit.",
-                origin="environment",
-                priority=0.6,
-                commitment=0.5,
-                motive_emotion="interest",
-            ),
-            causal_source_ids=(self.evidence[1],),
-            reason="test sleep active-goal limit",
-        )
-        payload = json.loads(self.proposal())
-        payload["goal_revisions"].append(
-            {
-                "goal_id": second.goal_id,
-                "status": "active",
-                "priority": 0.65,
-                "commitment": 0.55,
-                "progress": 0,
-                "emotional_pressure": 0,
-                "reason": "a second direction also appears relevant",
+    def legacy_proposal(self: Self, *, revise_goal: bool) -> SleepReflectionPlan:
+        return SleepReflectionPlan.model_validate_json(self.proposal()).model_copy(
+            update={
+                "goal_revisions": (
+                    SleepGoalRevision(
+                        goal_id=self.goal.goal_id,
+                        status="active",
+                        priority=0.75,
+                        commitment=0.65,
+                        progress=0.1,
+                        emotional_pressure=0.1,
+                        reason="legacy fixture",
+                    ),
+                )
+                if revise_goal
+                else (),
             }
         )
-        provider = FakeProvider(
-            [ProviderResponse(content=json.dumps(payload), usage=ModelUsage(900, 400))]
+
+    async def seed_successful_legacy_call(self: Self, plan: SleepReflectionPlan) -> str:
+        provider = FakeProvider([ProviderResponse(plan.model_dump_json(), ModelUsage(10, 10))])
+        gateway = self.cognition(provider).gateway
+        purpose = f"sleep_reflection:{self.sleep_run.sleep_id}"
+        result = await gateway.complete_structured(
+            self.subject_id,
+            purpose,
+            (ModelMessage(role="user", content="Legacy fixture"),),
+            SleepReflectionPlan,
+            idempotency_key=business_request_key(self.kernel.database, self.subject_id, purpose),
         )
-        plan = await self.cognition(provider, max_calls=1, max_active=1).propose(self.sleep_run)
+        return result.call_id
+
+    async def test_new_model_contract_rejects_goal_revision_fields(self: Self) -> None:
+        for revise_goal in (False, True):
+            with self.subTest(revise_goal=revise_goal):
+                payload = self.legacy_proposal(revise_goal=revise_goal).model_dump_json()
+                with self.assertRaises(ValidationError):
+                    SleepReflectionProposal.model_validate_json(payload)
+        provider = FakeProvider(
+            [
+                ProviderResponse(
+                    self.legacy_proposal(revise_goal=True).model_dump_json(), ModelUsage(10, 10)
+                )
+            ]
+        )
+        plan = await self.cognition(provider, max_calls=1).propose(self.sleep_run)
         self.assertIn("fallback reflection", plan.summary)
-        self.assertEqual(plan.goal_revisions, ())
+        self.assertFalse(plan.goal_revisions or plan.memories)
+        self.assertEqual(len(provider.requests), 1)
+
+    async def test_legacy_plan_with_goal_revision_falls_back_at_call_limit(self: Self) -> None:
+        call_id = await self.seed_successful_legacy_call(self.legacy_proposal(revise_goal=True))
+        ledger = ModelLedger(self.kernel.database)
+        call = ledger.get_call(call_id)
+        provider = FakeProvider([])
+        cognition = self.cognition(provider, max_calls=1)
+        plan = await cognition.propose(self.sleep_run)
+        self.assertEqual(await cognition.propose(self.sleep_run), plan)
+        self.assertIn("fallback reflection", plan.summary)
+        self.assertFalse(plan.goal_revisions or plan.memories)
+        self.assertFalse(provider.requests)
+        self.assertEqual(ledger.get_call(call_id), call)
+        with self.kernel.database.connection() as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM events WHERE event_type = 'sleep_reflection_rejected'"
+                ).fetchone()[0],
+                1,
+            )
+
+    async def test_legacy_plan_with_goal_revision_allows_bounded_fresh_candidate(
+        self: Self,
+    ) -> None:
+        await self.seed_successful_legacy_call(self.legacy_proposal(revise_goal=True))
+        provider = FakeProvider([ProviderResponse(self.proposal(), ModelUsage(10, 10))])
+        plan = await self.cognition(provider, max_calls=2).propose(self.sleep_run)
+        self.assertFalse(plan.goal_revisions)
+        self.assertTrue(plan.memories)
+        self.assertEqual(len(provider.requests), 1)
+
+    async def test_legacy_plan_without_goal_revisions_recovers_without_a_new_call(
+        self: Self,
+    ) -> None:
+        legacy = self.legacy_proposal(revise_goal=False)
+        await self.seed_successful_legacy_call(legacy)
+        provider = FakeProvider([])
+        plan = await self.cognition(provider, max_calls=1).propose(self.sleep_run)
+        self.assertEqual(plan.model_dump(), legacy.model_dump())
+        self.assertFalse(provider.requests)
+
+    async def test_cache_integrity_damage_is_not_a_policy_rejection(self: Self) -> None:
+        call_id = await self.seed_successful_legacy_call(self.legacy_proposal(revise_goal=False))
+        with self.kernel.database.transaction() as connection:
+            connection.execute(
+                "UPDATE model_calls SET response_hash=? WHERE call_id=?", ("0" * 64, call_id)
+            )
+        provider = FakeProvider([])
+        with self.assertRaises(IntegrityError):
+            await self.cognition(provider).propose(self.sleep_run)
+        self.assertFalse(provider.requests)
+
+    async def test_pending_legacy_context_conflict_does_not_send_or_mutate_call(self: Self) -> None:
+        purpose = f"sleep_reflection:{self.sleep_run.sleep_id}"
+        ledger = ModelLedger(self.kernel.database)
+        provider = FakeProvider([])
+        call, _ = ledger.prepare_call(
+            self.subject_id,
+            provider.name,
+            "test-model",
+            purpose,
+            content_hash("old contract"),
+            business_request_key(self.kernel.database, self.subject_id, purpose),
+        )
+        plan = await self.cognition(provider).propose(self.sleep_run)
+        self.assertIn("pending reflection request context changed", plan.summary)
+        self.assertFalse(provider.requests)
+        self.assertEqual(ledger.get_call(call.call_id), call)
+        self.assertFalse(ledger.attempts(call.call_id))
 
     async def test_events_arriving_after_sleep_start_are_not_in_current_context(self: Self) -> None:
         later = self.events.append(

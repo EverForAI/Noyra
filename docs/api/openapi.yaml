@@ -2549,6 +2549,14 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+  /api/v1/config/transports/outreach:
+    get:
+      tags: [configuration]
+      operationId: listTransportOutreach
+      security: [{ operatorBearer: [] }]
+      responses:
+        '200': { $ref: '#/components/responses/JsonList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
   /api/v1/config/transports/{transportId}/{operation}:
     post:
       tags: [configuration]

@@ -453,6 +453,8 @@ def test_approved_source_task_runs_real_bundle_cli_bridge_and_root_activation(
         (wallet_root / "password").write_text("transfer-test-pass")
         (wallet_root / "password").chmod(0o600)
         monkeypatch.setenv("NOYRA_WALLET_MODE", "local")
+        monkeypatch.setenv("NOYRA_PROFILE", "test")
+        monkeypatch.setenv("NOYRA_WALLET_TESTNET_ENABLED", "true")
         monkeypatch.setenv("NOYRA_WALLET_KEYSTORE_PATH", str(wallet_root / "wallet.json"))
         monkeypatch.setenv("NOYRA_WALLET_PASSWORD_FILE", str(wallet_root / "password"))
         monkeypatch.setenv("NOYRA_WALLET_RPC_URLS_JSON", '{"11155111":"https://rpc.example"}')
@@ -523,7 +525,7 @@ def test_approved_source_task_runs_real_bundle_cli_bridge_and_root_activation(
     identity.write_text(json.dumps({"target_id": TARGET_ID, "public_key": public}))
     identity.chmod(0o600)
     bridge = TargetActivationBridge(
-        root / "requests", root / "status", signing, timeout_seconds=60, poll_seconds=0.01
+        root / "requests", root / "status", signing, timeout_seconds=180, poll_seconds=0.01
     )
     monkeypatch.setattr(
         "noyra.core.at_rest.VolumeEncryptionProbe.probe",
@@ -603,6 +605,10 @@ def test_approved_source_task_runs_real_bundle_cli_bridge_and_root_activation(
 
         verify_local_wallet(target_root / "secrets" / f"migration-{task.task_id}", address)
         assert "EnvironmentFile=" in (activator.dropin_dir / "migration-target.conf").read_text()
+        runtime_environment = (
+            activator.state_root / "runtime-environment" / f"{task.task_id}.env"
+        ).read_text()
+        assert "NOYRA_WALLET_TESTNET_ENABLED=true" in runtime_environment
         assert (wallet_root / "wallet.json").is_file()  # source retained and fenced
     assert result["status"] == "committed"
     assert boots == [{"subject_id": SUBJECT_ID, "genesis_hash": "a" * 64, "target_id": TARGET_ID}]

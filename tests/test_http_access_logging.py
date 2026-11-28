@@ -207,13 +207,17 @@ def test_raw_protocol_and_control_data_never_reach_log_handlers(
     event: str,
 ) -> None:
     caplog.set_level(logging.INFO, logger="noyra.service")
-    response = raw_call(server, line)
-    if response.startswith(b"HTTP/"):
-        assert f" {status} ".encode() in response.split(b"\n", 1)[0]
-    else:
-        # stdlib retains HTTP/0.9 while rejecting a malformed/unsupported
-        # version, and returns an HTML error body without a status line.
-        assert f"Error code: {status}".encode() in response
+    # Repeat the oversized target to exercise real TCP close behavior: on
+    # Windows, unread client bytes can otherwise reset away the 414 response.
+    response_count = 4 if status == 414 else 1
+    for _ in range(response_count):
+        response = raw_call(server, line)
+        if response.startswith(b"HTTP/"):
+            assert f" {status} ".encode() in response.split(b"\n", 1)[0]
+        else:
+            # stdlib retains HTTP/0.9 while rejecting a malformed/unsupported
+            # version, and returns an HTML error body without a status line.
+            assert f"Error code: {status}".encode() in response
     records = [record for record in caplog.records if record.name == "noyra.service"]
     assert records
     for record in records:

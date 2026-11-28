@@ -181,6 +181,13 @@ def config_transports(self: RequestHandler, owner: NoyraHTTPServer) -> bool:
     return False
 
 
+def outreach_inventory(self: RequestHandler, owner: NoyraHTTPServer) -> None:
+    if not self._authorized():
+        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+        return
+    self._json(HTTPStatus.OK, owner.transports.outreach_inventory(owner.kernel.subject_id))
+
+
 def config_capabilities(self: RequestHandler, owner: NoyraHTTPServer) -> bool:
     if not self._authorized():
         self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})

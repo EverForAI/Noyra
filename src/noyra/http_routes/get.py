@@ -391,6 +391,9 @@ def dispatch(self: RequestHandler, owner: NoyraHTTPServer) -> None:
     elif parsed.path == "/api/config/transports":
         if read_connections.config_transports(self, owner):
             return
+    elif parsed.path == "/api/config/transports/outreach":
+        read_connections.outreach_inventory(self, owner)
+        return
     elif parsed.path == "/api/config/capabilities":
         if read_connections.config_capabilities(self, owner):
             return

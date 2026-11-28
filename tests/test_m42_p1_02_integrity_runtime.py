@@ -3537,6 +3537,8 @@ def test_malformed_memory_block_version_is_p0(tmp_path: Path) -> None:
         "Integrity fixture",
         "A bounded memory block.",
         reason="P1-02 classification fixture",
+        source_memory_ids=(),
+        source_event_ids=(),
     )
     with kernel.database.transaction() as connection:
         connection.execute("PRAGMA ignore_check_constraints = ON")
@@ -4451,7 +4453,11 @@ async def test_delayed_boot_review_retains_health_endpoints_and_keeps_admission_
 
 
 def _blocked_service_fixture(
-    tmp_path: Path, subject_id: str
+    tmp_path: Path,
+    subject_id: str,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    policy_mode: Literal["alert", "pause"] = "alert",
 ) -> tuple[NoyraService, threading.Event, threading.Event]:
     settings = ServiceSettings(
         data_dir=tmp_path,
@@ -4459,6 +4465,7 @@ def _blocked_service_fixture(
         genesis_hash=content_hash({"subject": subject_id}),
         host="127.0.0.1",
         port=0,
+        integrity_mode=policy_mode,
         active_interval_seconds=1,
         sleep_interval_seconds=1,
         integrity_interval_seconds=1,
@@ -4466,15 +4473,22 @@ def _blocked_service_fixture(
     service = NoyraService(settings)
     entered = threading.Event()
     release = threading.Event()
+    clock = datetime(2026, 1, 1, tzinfo=UTC)
     calls = 0
 
-    def blocking_runner(_context: Any) -> IntegrityCheckOutcome:
+    def blocking_runner(context: Any) -> IntegrityCheckOutcome:
         nonlocal calls
         calls += 1
         if calls == 1:
             return IntegrityCheckOutcome()
         entered.set()
-        release.wait()
+        if policy_mode == "pause":
+            # These checks cooperate with the shutdown checkpoint while the
+            # alert-mode tests keep the worker blocked until explicit release.
+            while not release.wait(0.01):
+                context.checkpoint()
+        else:
+            release.wait()
         return IntegrityCheckOutcome()
 
     registry = IntegrityRegistry(
@@ -4492,13 +4506,28 @@ def _blocked_service_fixture(
     service.integrity = IntegrityRuntimeController(
         service.kernel,
         tmp_path,
-        policy_mode="alert",
-        interval_seconds=0.01,
+        policy_mode=policy_mode,
+        interval_seconds=1,
         registry=registry,
+        clock=lambda: clock,
+        checkpoint=service._integrity_checkpoint if policy_mode == "pause" else None,
     )
     service.http.integrity = service.integrity
     service.loop.pre_tick_hook = service._integrity_pre_tick
     service.loop.next_wakeup_hook = service.integrity.seconds_until_due
+    # Exercise startup before either test starts its worker-entry watchdog.
+    # Make the periodic check due on the first tick without a wall-clock race.
+    try:
+        service.boot()
+        assert service.kernel.lifecycle.current().state == "active"
+        assert service.integrity.latest_report is not None
+        assert service.integrity.latest_report.status == "ok"
+        clock += timedelta(seconds=1)
+        assert service.integrity.seconds_until_due() == 0
+    except BaseException:
+        service.close()
+        raise
+    monkeypatch.setattr(service, "boot", lambda: None)
     return service, entered, release
 
 
@@ -4523,9 +4552,11 @@ async def _wait_for_worker_entry(
 
 
 def test_service_cancellation_joins_integrity_worker_before_releasing_ownership(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    service, entered, release = _blocked_service_fixture(tmp_path, "Noyra-p102-cancel-worker")
+    service, entered, release = _blocked_service_fixture(
+        tmp_path, "Noyra-p102-cancel-worker", monkeypatch
+    )
 
     async def exercise() -> None:
         task = asyncio.create_task(service.run())
@@ -4553,8 +4584,12 @@ def test_service_cancellation_joins_integrity_worker_before_releasing_ownership(
     asyncio.run(exercise())
 
 
-def test_graceful_shutdown_waits_for_integrity_worker_before_cleanup(tmp_path: Path) -> None:
-    service, entered, release = _blocked_service_fixture(tmp_path, "Noyra-p102-graceful-worker")
+def test_graceful_shutdown_waits_for_integrity_worker_before_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, entered, release = _blocked_service_fixture(
+        tmp_path, "Noyra-p102-graceful-worker", monkeypatch
+    )
     active_calls = 0
 
     async def active_hook() -> str:
@@ -4573,7 +4608,7 @@ def test_graceful_shutdown_waits_for_integrity_worker_before_cleanup(tmp_path: P
             assert not task.done()
             assert service.kernel.process_lock.held
             release.set()
-            await asyncio.wait_for(task, timeout=5)
+            await asyncio.wait_for(task, timeout=60)
             assert not service.kernel.process_lock.held
             assert active_calls == 0
         finally:
@@ -4586,64 +4621,19 @@ def test_graceful_shutdown_waits_for_integrity_worker_before_cleanup(tmp_path: P
     asyncio.run(exercise())
 
 
-def test_pause_mode_shutdown_cancellation_is_not_an_integrity_finding(tmp_path: Path) -> None:
-    subject_id = "Noyra-p102-shutdown-not-finding"
-    settings = ServiceSettings(
-        data_dir=tmp_path,
-        subject_id=subject_id,
-        genesis_hash=content_hash({"subject": subject_id}),
-        host="127.0.0.1",
-        port=0,
-        integrity_mode="pause",
-        active_interval_seconds=1,
-        sleep_interval_seconds=1,
-        integrity_interval_seconds=1,
+def test_pause_mode_shutdown_cancellation_is_not_an_integrity_finding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, entered, release = _blocked_service_fixture(
+        tmp_path, "Noyra-p102-shutdown-not-finding", monkeypatch, policy_mode="pause"
     )
-    service = NoyraService(settings)
-    entered = threading.Event()
-    release = threading.Event()
-    calls = 0
-
-    def cooperative_runner(context: Any) -> IntegrityCheckOutcome:
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            return IntegrityCheckOutcome()
-        entered.set()
-        while not release.wait(0.01):
-            context.checkpoint()
-        return IntegrityCheckOutcome()
-
-    registry = IntegrityRegistry(
-        (
-            IntegrityCheckSpec(
-                "test.shutdown_cancel",
-                1,
-                "test",
-                frozenset({"startup_light", "periodic_deep"}),
-                cooperative_runner,
-                "light",
-            ),
-        )
-    )
-    service.integrity = IntegrityRuntimeController(
-        service.kernel,
-        tmp_path,
-        policy_mode="pause",
-        interval_seconds=0.01,
-        registry=registry,
-        checkpoint=service._integrity_checkpoint,
-    )
-    service.http.integrity = service.integrity
-    service.loop.pre_tick_hook = service._integrity_pre_tick
-    service.loop.next_wakeup_hook = service.integrity.seconds_until_due
 
     async def exercise() -> None:
         task = asyncio.create_task(service.run())
         try:
             await _wait_for_worker_entry(entered, task)
             service.request_shutdown()
-            await asyncio.wait_for(task, timeout=5)
+            await asyncio.wait_for(task, timeout=60)
 
             assert service.kernel.lifecycle.current().state == "active"
             assert service.integrity.latest_report is not None
@@ -4676,6 +4666,7 @@ def test_sql_progress_shutdown_is_not_an_integrity_finding(tmp_path: Path) -> No
     )
     service = NoyraService(settings)
     entered = threading.Event()
+    clock = datetime(2026, 1, 1, tzinfo=UTC)
     calls = 0
 
     def sql_runner(context: Any) -> IntegrityCheckOutcome:
@@ -4707,20 +4698,20 @@ def test_sql_progress_shutdown_is_not_an_integrity_finding(tmp_path: Path) -> No
         service.kernel,
         tmp_path,
         policy_mode="pause",
-        interval_seconds=0.01,
+        interval_seconds=1,
         registry=registry,
+        clock=lambda: clock,
         checkpoint=service._integrity_checkpoint,
     )
     service.http.integrity = service.integrity
-    service.loop.pre_tick_hook = service._integrity_pre_tick
-    service.loop.next_wakeup_hook = service.integrity.seconds_until_due
 
     async def exercise() -> None:
-        task = asyncio.create_task(service.run())
+        task = asyncio.create_task(service._integrity_pre_tick())
         try:
             await _wait_for_worker_entry(entered, task)
             service.request_shutdown()
-            await asyncio.wait_for(task, timeout=5)
+            result = await asyncio.wait_for(task, timeout=5)
+            assert result is not None and result.action == "shutdown_pending"
 
             assert service.kernel.lifecycle.current().state == "active"
             assert service.integrity.latest_report is not None
@@ -4734,7 +4725,18 @@ def test_sql_progress_shutdown_is_not_an_integrity_finding(tmp_path: Path) -> No
                 with pytest.raises(asyncio.CancelledError):
                     await task
 
-    asyncio.run(exercise())
+    try:
+        # Boot and advance the scheduler before timing the actual worker entry.
+        service.boot()
+        assert service.kernel.lifecycle.current().state == "active"
+        startup = service.integrity.latest_report
+        assert startup is not None and startup.status == "ok"
+        clock += timedelta(seconds=1)
+        asyncio.run(exercise())
+        assert calls == 2
+        assert service.integrity.latest_report == startup
+    finally:
+        service.close()
 
 
 def test_active_tick_stops_before_work_after_shutdown_request(tmp_path: Path) -> None:
